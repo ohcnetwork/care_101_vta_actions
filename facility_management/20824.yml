@@ -36,6 +36,30 @@ jobs:
           echo "user_id=$USER_ID" >> $GITHUB_OUTPUT
           echo "expected_facility_id=$EXPECTED_FACILITY_ID" >> $GITHUB_OUTPUT
 
+      # ── Single source of truth for the allowed department names ──
+      # Used by the jq filters (grading) and the human-readable feedback message.
+      - name: Define allowed department names
+        id: depts
+        run: |
+          NAMES=(
+            "Cardiology"
+            "Neurology"
+            "Ophthalmology"
+            "General Medicine"
+            "Pediatrics"
+            "Orthopedics"
+            "Radiology"
+            "Pharmacy"
+            "Laboratory"
+            "Emergency"
+          )
+          # jq IN(...) argument list: "Cardiology","Neurology",...
+          JQ_LIST=$(printf '%s\n' "${NAMES[@]}" | jq -R . | paste -sd, -)
+          # Human-readable list: Cardiology, Neurology, ...
+          HUMAN=$(IFS=, ; printf '%s' "${NAMES[*]}" | sed 's/,/, /g')
+          echo "jq_list=$JQ_LIST" >> $GITHUB_OUTPUT
+          echo "human=$HUMAN" >> $GITHUB_OUTPUT
+
       # ── Parse department URL from submission ──
       - name: Parse submission data
         id: parse
@@ -120,7 +144,7 @@ jobs:
           method: GET
           jq-filter: |
             [
-              ((.name // "") | IN("Cardiology", "Neurology", "Ophthalmology", "General Medicine", "Pediatrics", "Orthopedics", "Radiology", "Pharmacy", "Laboratory", "Emergency")),
+              ((.name // "") | IN(${{ steps.depts.outputs.jq_list }})),
               (.org_type == "dept"),
               (.system_generated == false),
               (.created_by.id == "${{ steps.setup.outputs.user_id }}")
@@ -130,7 +154,7 @@ jobs:
           label: "All department requirements met"
           output-jq-filter: |
             {
-              name: ((.name // "") | IN("Cardiology", "Neurology", "Ophthalmology", "General Medicine", "Pediatrics", "Orthopedics", "Radiology", "Pharmacy", "Laboratory", "Emergency")),
+              name: ((.name // "") | IN(${{ steps.depts.outputs.jq_list }})),
               type: (.org_type == "dept"),
               not_system: (.system_generated == false),
               creator: (.created_by.id == "${{ steps.setup.outputs.user_id }}")
@@ -139,6 +163,8 @@ jobs:
       # ── Build feedback from check results ──
       - name: Build feedback
         if: env.skip_checks != 'true'
+        env:
+          ALLOWED_HUMAN: ${{ steps.depts.outputs.human }}
         run: |
           RESULT='${{ steps.check.outputs.result }}'
 
@@ -171,8 +197,8 @@ jobs:
             STATUS="failure"
           fi
 
-          FEEDBACK=$(printf "%s\n\n%s Department name should be one of: Cardiology, Neurology, Ophthalmology, General Medicine, Pediatrics, Orthopedics, Radiology, Pharmacy, Laboratory, Emergency (exact match, case-sensitive)\n\n%s Department type should be \"Department\"\n\n%s Department should be one you created (not the auto-generated \"Administration\" department)\n\n%s Department should be created by you (using the credentials assigned to you)\n\nPlease make sure that you go through the assignment instructions and verify your department settings in CARE. If you're having trouble with this assignment, refer to the course materials and provided guidelines." \
-            "$HEADER" "$T1" "$T2" "$T3" "$T4")
+          FEEDBACK=$(printf "%s\n\n%s Department name should be one of: %s (exact match, case-sensitive)\n\n%s Department type should be \"Department\"\n\n%s Department should be one you created (not the auto-generated \"Administration\" department)\n\n%s Department should be created by you (using the credentials assigned to you)\n\nPlease make sure that you go through the assignment instructions and verify your department settings in CARE. If you're having trouble with this assignment, refer to the course materials and provided guidelines." \
+            "$HEADER" "$T1" "$ALLOWED_HUMAN" "$T2" "$T3" "$T4")
 
           jq -n \
             --arg status "$STATUS" \
