@@ -1,0 +1,210 @@
+name: Create Department Evaluation
+on:
+  push:
+    branches: ["submission-*"]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    env:
+      CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
+      CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
+      CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
+      CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.CARE_GITHUB_ACTION_TOKEN }}
+
+      # ── Fetch setup_data.json from main branch ──
+      - name: Fetch setup data from main
+        id: setup
+        run: |
+          git fetch origin main
+          git checkout origin/main -- setup_data.json
+          USER_ID=$(jq -r '.user.id' setup_data.json)
+          EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
+
+          if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
+            echo "::error::Could not read user.id from setup_data.json"
+            exit 1
+          fi
+          if [ -z "$EXPECTED_FACILITY_ID" ] || [ "$EXPECTED_FACILITY_ID" = "null" ]; then
+            echo "::error::Could not read facility_management.facility_id from setup_data.json — has the previous target (Create Facility) been completed?"
+            exit 1
+          fi
+
+          echo "user_id=$USER_ID" >> $GITHUB_OUTPUT
+          echo "expected_facility_id=$EXPECTED_FACILITY_ID" >> $GITHUB_OUTPUT
+
+      # ── Parse department URL from submission ──
+      - name: Parse submission data
+        id: parse
+        run: |
+          SUBMISSION_ID=$(jq -r '.id' submission.json)
+          DEPARTMENT_URL=$(jq -r '.checklist[1].result' submission.json)
+
+          echo "submission_id=$SUBMISSION_ID" >> $GITHUB_OUTPUT
+          echo "department_url=$DEPARTMENT_URL" >> $GITHUB_OUTPUT
+
+          # Reject URLs not pointing at the configured CARE front-end
+          case "$DEPARTMENT_URL" in
+            "$CARE_FE_BASE_URL"/*)
+              ;;
+            *)
+              echo "::error::URL does not start with $CARE_FE_BASE_URL: $DEPARTMENT_URL"
+              echo "valid=false" >> $GITHUB_OUTPUT
+              exit 0
+              ;;
+          esac
+
+          # Extract facility_id and department_id from URL
+          # URL format: <CARE_FE_BASE_URL>/facility/{facility_id}/settings/departments/{department_id}/<tab>
+          UUID_RE='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+
+          URL_FACILITY_ID=$(echo "$DEPARTMENT_URL" | sed -nE "s|.*/facility/($UUID_RE)/settings/departments/$UUID_RE.*|\1|p")
+          DEPARTMENT_ID=$(echo "$DEPARTMENT_URL" | sed -nE "s|.*/facility/$UUID_RE/settings/departments/($UUID_RE).*|\1|p")
+
+          if [ -z "$URL_FACILITY_ID" ] || [ -z "$DEPARTMENT_ID" ]; then
+            echo "::error::Could not parse facility_id and department_id from URL: $DEPARTMENT_URL"
+            echo "valid=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "url_facility_id=$URL_FACILITY_ID" >> $GITHUB_OUTPUT
+          echo "department_id=$DEPARTMENT_ID" >> $GITHUB_OUTPUT
+          echo "valid=true" >> $GITHUB_OUTPUT
+
+      # ── Validate URL was parsed successfully ──
+      - name: Validate parsed URL
+        if: steps.parse.outputs.valid != 'true'
+        env:
+          DEPARTMENT_URL: ${{ steps.parse.outputs.department_url }}
+        run: |
+          FEEDBACK=$(printf "Uh oh! The department URL you submitted could not be parsed. After creating the department, click on it to open its detail page and copy the URL from your browser address bar.\n\nExpected format: \`%s/facility/<facility-id>/settings/departments/<department-id>/departments\`\n\nURL submitted: \`%s\`" \
+            "$CARE_FE_BASE_URL" "$DEPARTMENT_URL")
+
+          jq -n \
+            --arg status "failure" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+          echo "skip_checks=true" >> $GITHUB_ENV
+
+      # ── Validate the URL's facility_id matches the student's facility from the previous target ──
+      - name: Validate facility ownership in URL
+        if: env.skip_checks != 'true' && steps.parse.outputs.url_facility_id != steps.setup.outputs.expected_facility_id
+        env:
+          URL_FACILITY_ID: ${{ steps.parse.outputs.url_facility_id }}
+          EXPECTED_FACILITY_ID: ${{ steps.setup.outputs.expected_facility_id }}
+        run: |
+          FEEDBACK=$(printf "Uh oh! The department URL you submitted points to a different facility than the one you created in the previous assignment.\n\nExpected facility id: %s\nFacility id in your URL: %s\n\nMake sure you create the department inside your own facility, and submit the URL of that department." \
+            "$EXPECTED_FACILITY_ID" "$URL_FACILITY_ID")
+
+          jq -n \
+            --arg status "failure" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+          echo "skip_checks=true" >> $GITHUB_ENV
+
+      # ── Single API call: check all 4 conditions ──
+      - name: Check department requirements
+        if: env.skip_checks != 'true'
+        id: check
+        uses: ohc-vta/care-actions/check-api@main
+        with:
+          endpoint: "/api/v1/facility/${{ steps.parse.outputs.url_facility_id }}/organizations/${{ steps.parse.outputs.department_id }}/"
+          method: GET
+          jq-filter: |
+            [
+              ((.name // "") | IN("Cardiology", "Neurology", "Ophthalmology", "General Medicine", "Pediatrics", "Orthopedics", "Radiology", "Pharmacy", "Laboratory", "Emergency")),
+              (.org_type == "dept"),
+              (.system_generated == false),
+              (.created_by.id == "${{ steps.setup.outputs.user_id }}")
+            ] | map(select(.)) | length
+          assertion: equals
+          expected: "4"
+          label: "All department requirements met"
+          output-jq-filter: |
+            {
+              name: ((.name // "") | IN("Cardiology", "Neurology", "Ophthalmology", "General Medicine", "Pediatrics", "Orthopedics", "Radiology", "Pharmacy", "Laboratory", "Emergency")),
+              type: (.org_type == "dept"),
+              not_system: (.system_generated == false),
+              creator: (.created_by.id == "${{ steps.setup.outputs.user_id }}")
+            }
+
+      # ── Build feedback from check results ──
+      - name: Build feedback
+        if: env.skip_checks != 'true'
+        run: |
+          RESULT='${{ steps.check.outputs.result }}'
+
+          # Differentiated message when the API call itself failed (e.g. 404)
+          if echo "$RESULT" | grep -q '^error:'; then
+            FEEDBACK=$(printf "Uh oh! We couldn't fetch your department from CARE.\n\nDetails: %s\n\nMake sure the department URL you submitted is correct and that the department hasn't been deleted. Expected URL format: \`%s/facility/<facility-id>/settings/departments/<department-id>/<tab>\`" \
+              "$RESULT" "$CARE_FE_BASE_URL")
+
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            exit 0
+          fi
+
+          RESULTS='${{ steps.check.outputs.extracted }}'
+
+          # Parse individual results
+          T1="✗"; T2="✗"; T3="✗"; T4="✗"
+          [ "$(echo "$RESULTS" | jq -r '.name')"       = "true" ] && T1="✓"
+          [ "$(echo "$RESULTS" | jq -r '.type')"       = "true" ] && T2="✓"
+          [ "$(echo "$RESULTS" | jq -r '.not_system')" = "true" ] && T3="✓"
+          [ "$(echo "$RESULTS" | jq -r '.creator')"    = "true" ] && T4="✓"
+
+          if [ "${{ steps.check.outputs.passed }}" = "true" ]; then
+            HEADER="Great work! All checks passed. Your department meets all the requirements."
+            STATUS="success"
+          else
+            HEADER="Uh oh! It looks like you've missed some parts of the assignment. Here are the results of the tests that we ran. A tick (✓) indicates a successful test, and a cross (✗) indicates a failed test."
+            STATUS="failure"
+          fi
+
+          FEEDBACK=$(printf "%s\n\n%s Department name should be one of: Cardiology, Neurology, Ophthalmology, General Medicine, Pediatrics, Orthopedics, Radiology, Pharmacy, Laboratory, Emergency (exact match, case-sensitive)\n\n%s Department type should be \"Department\"\n\n%s Department should be one you created (not the auto-generated \"Administration\" department)\n\n%s Department should be created by you (using the credentials assigned to you)\n\nPlease make sure that you go through the assignment instructions and verify your department settings in CARE. If you're having trouble with this assignment, refer to the course materials and provided guidelines." \
+            "$HEADER" "$T1" "$T2" "$T3" "$T4")
+
+          jq -n \
+            --arg status "$STATUS" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+      # ── Grade via grade-action ──
+      - name: Grade submission
+        if: always()
+        uses: pupilfirst/grade-action@v1
+        with:
+          report_file_path: "report.json"
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+
+      # ── Report result to LMS ──
+      - name: Report success to LMS
+        if: success()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "success"
+          description: "Department evaluation completed."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+
+      - name: Report failure to LMS
+        if: failure()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "error"
+          description: "Department evaluation failed unexpectedly. Please resubmit or contact support."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
