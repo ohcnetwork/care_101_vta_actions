@@ -24,13 +24,25 @@ jobs:
           USER_ID=$(jq -r '.user.id' setup_data.json)
           EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
 
+          # Missing user.id is a course-config bug (bootstrap action didn't run) —
+          # not student-recoverable, so fail hard and surface in CI logs.
           if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
             echo "::error::Could not read user.id from setup_data.json"
             exit 1
           fi
+
+          # Missing facility_id IS student-recoverable: the previous target
+          # (Create Facility) hasn't been *passed* yet. Pupilfirst lets students
+          # submit this target after merely *submitting* the prerequisite, so we
+          # need to give actionable feedback here instead of failing the job.
           if [ -z "$EXPECTED_FACILITY_ID" ] || [ "$EXPECTED_FACILITY_ID" = "null" ]; then
-            echo "::error::Could not read facility_management.facility_id from setup_data.json — has the previous target (Create Facility) been completed?"
-            exit 1
+            FEEDBACK="Please pass the **Create Facility** target first. Submitting it isn't enough — it needs a passing grade so this evaluation can verify the department belongs to your facility."
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            echo "skip_checks=true" >> $GITHUB_ENV
+            exit 0
           fi
 
           echo "user_id=$USER_ID" >> $GITHUB_OUTPUT
@@ -62,6 +74,7 @@ jobs:
 
       # ── Parse department URL from submission ──
       - name: Parse submission data
+        if: env.skip_checks != 'true'
         id: parse
         run: |
           SUBMISSION_ID=$(jq -r '.id' submission.json)
@@ -100,7 +113,7 @@ jobs:
 
       # ── Validate URL was parsed successfully ──
       - name: Validate parsed URL
-        if: steps.parse.outputs.valid != 'true'
+        if: env.skip_checks != 'true' && steps.parse.outputs.valid != 'true'
         env:
           DEPARTMENT_URL: ${{ steps.parse.outputs.department_url }}
         run: |
