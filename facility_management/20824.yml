@@ -8,8 +8,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
-      CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
-      CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
       CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
     steps:
       - name: Checkout
@@ -60,7 +58,7 @@ jobs:
           esac
 
           # Extract facility_id and department_id from URL
-          # URL format: <CARE_FE_BASE_URL>/facility/{facility_id}/settings/departments/{department_id}/<tab>
+          # URL format: <CARE_FE_BASE_URL>/facility/{facility_id}/settings/departments/{department_id}/departments
           UUID_RE='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
 
           URL_FACILITY_ID=$(echo "$DEPARTMENT_URL" | sed -nE "s|.*/facility/($UUID_RE)/settings/departments/$UUID_RE.*|\1|p")
@@ -114,6 +112,9 @@ jobs:
         if: env.skip_checks != 'true'
         id: check
         uses: ohc-vta/care-actions/check-api@main
+        env:
+          CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
+          CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
         with:
           endpoint: "/api/v1/facility/${{ steps.parse.outputs.url_facility_id }}/organizations/${{ steps.parse.outputs.department_id }}/"
           method: GET
@@ -143,7 +144,7 @@ jobs:
 
           # Differentiated message when the API call itself failed (e.g. 404)
           if echo "$RESULT" | grep -q '^error:'; then
-            FEEDBACK=$(printf "Uh oh! We couldn't fetch your department from CARE.\n\nDetails: %s\n\nMake sure the department URL you submitted is correct and that the department hasn't been deleted. Expected URL format: \`%s/facility/<facility-id>/settings/departments/<department-id>/<tab>\`" \
+            FEEDBACK=$(printf "Uh oh! We couldn't fetch your department from CARE.\n\nDetails: %s\n\nMake sure the department URL you submitted is correct and that the department hasn't been deleted. Expected URL format: \`%s/facility/<facility-id>/settings/departments/<department-id>/departments\`" \
               "$RESULT" "$CARE_FE_BASE_URL")
 
             jq -n \
