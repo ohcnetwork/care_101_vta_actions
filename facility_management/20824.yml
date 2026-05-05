@@ -164,10 +164,11 @@ jobs:
       - name: Build feedback
         if: env.skip_checks != 'true'
         env:
+          RESULT: ${{ steps.check.outputs.result }}
+          RESULTS: ${{ steps.check.outputs.extracted }}
+          PASSED: ${{ steps.check.outputs.passed }}
           ALLOWED_HUMAN: ${{ steps.depts.outputs.human }}
         run: |
-          RESULT='${{ steps.check.outputs.result }}'
-
           # Differentiated message when the API call itself failed (e.g. 404)
           if echo "$RESULT" | grep -q '^error:'; then
             FEEDBACK=$(printf "Uh oh! We couldn't fetch your department from CARE.\n\nDetails: %s\n\nMake sure the department URL you submitted is correct and that the department hasn't been deleted. Expected URL format: \`%s/facility/<facility-id>/settings/departments/<department-id>/departments\`" \
@@ -180,8 +181,6 @@ jobs:
             exit 0
           fi
 
-          RESULTS='${{ steps.check.outputs.extracted }}'
-
           # Parse individual results
           T1="✗"; T2="✗"; T3="✗"; T4="✗"
           [ "$(echo "$RESULTS" | jq -r '.name')"       = "true" ] && T1="✓"
@@ -189,7 +188,7 @@ jobs:
           [ "$(echo "$RESULTS" | jq -r '.not_system')" = "true" ] && T3="✓"
           [ "$(echo "$RESULTS" | jq -r '.creator')"    = "true" ] && T4="✓"
 
-          if [ "${{ steps.check.outputs.passed }}" = "true" ]; then
+          if [ "$PASSED" = "true" ]; then
             HEADER="Great work! All checks passed. Your department meets all the requirements."
             STATUS="success"
           else
