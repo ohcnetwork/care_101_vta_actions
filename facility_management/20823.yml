@@ -8,8 +8,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
-      CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
-      CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
       CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
     steps:
       - name: Checkout
@@ -93,6 +91,9 @@ jobs:
         if: env.skip_checks != 'true'
         id: check
         uses: ohc-vta/care-actions/check-api@main
+        env:
+          CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
+          CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
         with:
           endpoint: "/api/v1/facility/${{ steps.parse.outputs.facility_id }}/"
           method: GET
@@ -127,9 +128,11 @@ jobs:
       # ── Build feedback from check results ──
       - name: Build feedback
         if: env.skip_checks != 'true'
+        env:
+          RESULT: ${{ steps.check.outputs.result }}
+          RESULTS: ${{ steps.check.outputs.extracted }}
+          PASSED: ${{ steps.check.outputs.passed }}
         run: |
-          RESULT='${{ steps.check.outputs.result }}'
-
           # Differentiated message when the API call itself failed (e.g. 404)
           if echo "$RESULT" | grep -q '^error:'; then
             FEEDBACK=$(printf "Uh oh! We couldn't fetch your facility from CARE.\n\nDetails: %s\n\nMake sure the facility URL you submitted is correct and that the facility hasn't been deleted. Expected URL format: \`%s/facility/<facility-id>/overview\`" \
@@ -141,8 +144,6 @@ jobs:
               '{status: $status, feedback: $feedback}' > report.json
             exit 0
           fi
-
-          RESULTS='${{ steps.check.outputs.extracted }}'
 
           # Parse individual results
           T1="✗"; T2="✗"; T3="✗"; T4="✗"; T5="✗"; T6="✗"; T7="✗"; T8="✗"; T9="✗"
@@ -156,7 +157,7 @@ jobs:
           [ "$(echo "$RESULTS" | jq -r '.public')"   = "true" ] && T8="✓"
           [ "$(echo "$RESULTS" | jq -r '.creator')"  = "true" ] && T9="✓"
 
-          if [ "${{ steps.check.outputs.passed }}" = "true" ]; then
+          if [ "$PASSED" = "true" ]; then
             HEADER="Great work! All checks passed. Your facility meets all the requirements."
             STATUS="success"
           else
