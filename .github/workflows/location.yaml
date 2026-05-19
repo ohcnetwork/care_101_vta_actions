@@ -5,7 +5,7 @@ on:
     branches: ["submission-*"]
 
 jobs:
-  evaluate:
+  location_evaluate:
     runs-on: ubuntu-latest
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
@@ -163,7 +163,6 @@ jobs:
           RESULTS: ${{ steps.check.outputs.extracted }}
           PASSED: ${{ steps.check.outputs.passed }}
         run: |
-          # API call failed
           if echo "$RESULT" | grep -q '^error:'; then
             FEEDBACK=$(printf "Uh oh! We couldn't fetch your location from CARE.\n\nDetails: %s\n\nMake sure the location URL you submitted is correct and that the location hasn't been deleted. Expected URL format: \`%s/facility/<facility-id>/settings/locations/<location-id>\`" \
               "$RESULT" "$CARE_FE_BASE_URL")
