@@ -5,7 +5,7 @@ on:
     branches: ["submission-*"]
 
 jobs:
-  location_evaluate:
+  evaluate:
     runs-on: ubuntu-latest
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
@@ -23,6 +23,7 @@ jobs:
           git checkout origin/main -- setup_data.json
           USER_ID=$(jq -r '.user.id' setup_data.json)
           EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
+          DEPT_NAME=$(jq -r '.facility_management.department_name // empty' setup_data.json)
 
           # missing user.id: bootstrap did not run, not student-recoverable
           if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
@@ -41,8 +42,20 @@ jobs:
             exit 0
           fi
 
+          # missing department_name: Create Department hasn't passed yet, surface feedback
+          if [ -z "$DEPT_NAME" ] || [ "$DEPT_NAME" = "null" ]; then
+            FEEDBACK="Please pass the **Create Department** target first. The room location name must match the department name you chose in that assignment."
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            echo "skip_checks=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
           echo "user_id=$USER_ID" >> $GITHUB_OUTPUT
           echo "expected_facility_id=$EXPECTED_FACILITY_ID" >> $GITHUB_OUTPUT
+          echo "department_name=$DEPT_NAME" >> $GITHUB_OUTPUT
 
       - name: Parse submission data
         if: env.skip_checks != 'true'
@@ -86,7 +99,7 @@ jobs:
         env:
           LOCATION_URL: ${{ steps.parse.outputs.location_url }}
         run: |
-          FEEDBACK=$(printf "Uh oh! The location URL you submitted could not be parsed. After creating the Casualty room, click on it to open its detail page and copy the URL from your browser address bar.\n\nExpected format: \`%s/facility/<facility-id>/settings/locations/<location-id>\`\n\nURL submitted: \`%s\`" \
+          FEEDBACK=$(printf "Uh oh! The location URL you submitted could not be parsed. After creating the room location, click on it to open its detail page and copy the URL from your browser address bar.\n\nExpected format: \`%s/facility/<facility-id>/settings/locations/<location-id>\`\n\nURL submitted: \`%s\`" \
             "$CARE_FE_BASE_URL" "$LOCATION_URL")
 
           jq -n \
@@ -102,7 +115,7 @@ jobs:
           URL_FACILITY_ID: ${{ steps.parse.outputs.url_facility_id }}
           EXPECTED_FACILITY_ID: ${{ steps.setup.outputs.expected_facility_id }}
         run: |
-          FEEDBACK=$(printf "Uh oh! The location URL you submitted points to a different facility than the one you created in the previous assignment.\n\nExpected facility id: %s\nFacility id in your URL: %s\n\nMake sure you create the locations inside your own facility, and submit the URL of the Casualty room." \
+          FEEDBACK=$(printf "Uh oh! The location URL you submitted points to a different facility than the one you created in the previous assignment.\n\nExpected facility id: %s\nFacility id in your URL: %s\n\nMake sure you create the locations inside your own facility, and submit the URL of the room location." \
             "$EXPECTED_FACILITY_ID" "$URL_FACILITY_ID")
 
           jq -n \
@@ -124,7 +137,7 @@ jobs:
           method: GET
           jq-filter: |
             [
-              (.name == "Casualty"),
+              (.name == "${{ steps.setup.outputs.department_name }}"),
               (.form == "ro"),
               (.status == "active"),
               (.operational_status == "U"),
@@ -143,7 +156,7 @@ jobs:
             {
               casualty_id: .id,
               ground_floor_id: ((.parent // {}) | .id // ""),
-              casualty_name: (.name == "Casualty"),
+              casualty_name: (.name == "${{ steps.setup.outputs.department_name }}"),
               casualty_form: (.form == "ro"),
               casualty_status: (.status == "active"),
               casualty_op_status: (.operational_status == "U"),
@@ -162,6 +175,7 @@ jobs:
           RESULT: ${{ steps.check.outputs.result }}
           RESULTS: ${{ steps.check.outputs.extracted }}
           PASSED: ${{ steps.check.outputs.passed }}
+          DEPT_NAME: ${{ steps.setup.outputs.department_name }}
         run: |
           if echo "$RESULT" | grep -q '^error:'; then
             FEEDBACK=$(printf "Uh oh! We couldn't fetch your location from CARE.\n\nDetails: %s\n\nMake sure the location URL you submitted is correct and that the location hasn't been deleted. Expected URL format: \`%s/facility/<facility-id>/settings/locations/<location-id>\`" \
@@ -197,8 +211,8 @@ jobs:
             STATUS="failure"
           fi
 
-          FEEDBACK=$(printf "%s\n\n**Casualty Room** (the URL you submitted):\n\n%s Name should be exactly \"Casualty\"\n\n%s Location Form should be \"Room\"\n\n%s Status should be \"Active\"\n\n%s Operational Status should be \"Unoccupied\"\n\n%s Description should not be empty\n\n%s Location should be created by you (using the credentials assigned to you)\n\n**Ground Floor** (parent location of Casualty):\n\n%s Name should be exactly \"Ground Floor\"\n\n%s Location Form should be \"Level\"\n\n%s Status should be \"Active\"\n\n%s Operational Status should be \"Unoccupied\"\n\n%s Description should not be empty\n\nPlease make sure that you go through the assignment instructions and verify your location settings in CARE. If you're having trouble with this assignment, refer to the course materials and provided guidelines." \
-            "$HEADER" "$T1" "$T2" "$T3" "$T4" "$T5" "$T6" "$T7" "$T8" "$T9" "$T10" "$T11")
+          FEEDBACK=$(printf "%s\n\n**Room location** (the URL you submitted):\n\n%s Name should match your department name exactly: \"%s\"\n\n%s Location Form should be \"Room\"\n\n%s Status should be \"Active\"\n\n%s Operational Status should be \"Unoccupied\"\n\n%s Description should not be empty\n\n%s Location should be created by you (using the credentials assigned to you)\n\n**Ground Floor** (parent location):\n\n%s Name should be exactly \"Ground Floor\"\n\n%s Location Form should be \"Level\"\n\n%s Status should be \"Active\"\n\n%s Operational Status should be \"Unoccupied\"\n\n%s Description should not be empty\n\nPlease make sure that you go through the assignment instructions and verify your location settings in CARE. If you're having trouble with this assignment, refer to the course materials and provided guidelines." \
+            "$HEADER" "$T1" "$DEPT_NAME" "$T2" "$T3" "$T4" "$T5" "$T6" "$T7" "$T8" "$T9" "$T10" "$T11")
 
           jq -n \
             --arg status "$STATUS" \
