@@ -1,0 +1,254 @@
+name: Create Beds Evaluation
+
+on:
+  push:
+    branches: ["submission-*"]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    env:
+      CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
+      CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.CARE_GITHUB_ACTION_TOKEN }}
+
+      - name: Fetch setup data from main
+        id: setup
+        run: |
+          git fetch origin main
+          git checkout origin/main -- setup_data.json
+          USER_ID=$(jq -r '.user.id' setup_data.json)
+          EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
+          EXPECTED_ROOM_ID=$(jq -r '.location_management.casualty_id // empty' setup_data.json)
+
+          # missing user.id: bootstrap did not run, not student-recoverable
+          if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
+            echo "::error::Could not read user.id from setup_data.json"
+            exit 1
+          fi
+
+          # missing facility_id: Create Facility hasn't passed yet, surface feedback
+          if [ -z "$EXPECTED_FACILITY_ID" ] || [ "$EXPECTED_FACILITY_ID" = "null" ]; then
+            FEEDBACK="Please pass the **Create Facility** target first. It needs a passing grade before this evaluation can run."
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            echo "skip_checks=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # missing room_id: Create Location hasn't passed yet, surface feedback
+          if [ -z "$EXPECTED_ROOM_ID" ] || [ "$EXPECTED_ROOM_ID" = "null" ]; then
+            FEEDBACK="Please pass the **Create Location** target first. The beds must be created inside the room location from that assignment."
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            echo "skip_checks=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "user_id=$USER_ID" >> $GITHUB_OUTPUT
+          echo "expected_facility_id=$EXPECTED_FACILITY_ID" >> $GITHUB_OUTPUT
+          echo "expected_room_id=$EXPECTED_ROOM_ID" >> $GITHUB_OUTPUT
+
+      - name: Parse submission data
+        if: env.skip_checks != 'true'
+        id: parse
+        run: |
+          SUBMISSION_ID=$(jq -r '.id' submission.json)
+          LOCATION_URL=$(jq -r '.checklist[1].result' submission.json)
+
+          echo "submission_id=$SUBMISSION_ID" >> $GITHUB_OUTPUT
+          echo "location_url=$LOCATION_URL" >> $GITHUB_OUTPUT
+
+          # reject URLs not from the CARE frontend
+          case "$LOCATION_URL" in
+            "$CARE_FE_BASE_URL"/*)
+              ;;
+            *)
+              echo "::error::URL does not start with $CARE_FE_BASE_URL: $LOCATION_URL"
+              echo "valid=false" >> $GITHUB_OUTPUT
+              exit 0
+              ;;
+          esac
+
+          # URL format: <CARE_FE_BASE_URL>/facility/{facility_id}/settings/locations/{location_id}
+          UUID_RE='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+
+          URL_FACILITY_ID=$(echo "$LOCATION_URL" | sed -nE "s|.*/facility/($UUID_RE)/settings/locations/.*|\1|p")
+          URL_LOCATION_ID=$(echo "$LOCATION_URL" | sed -nE "s|.*/facility/$UUID_RE/settings/locations/($UUID_RE).*|\1|p")
+
+          if [ -z "$URL_FACILITY_ID" ] || [ -z "$URL_LOCATION_ID" ]; then
+            echo "::error::Could not parse facility_id and location_id from URL: $LOCATION_URL"
+            echo "valid=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "url_facility_id=$URL_FACILITY_ID" >> $GITHUB_OUTPUT
+          echo "url_location_id=$URL_LOCATION_ID" >> $GITHUB_OUTPUT
+          echo "valid=true" >> $GITHUB_OUTPUT
+
+      - name: Validate parsed URL
+        if: env.skip_checks != 'true' && steps.parse.outputs.valid != 'true'
+        env:
+          LOCATION_URL: ${{ steps.parse.outputs.location_url }}
+        run: |
+          FEEDBACK=$(printf "Uh oh! The URL you submitted could not be parsed. Navigate to your room location in CARE, then copy the URL from your browser address bar.\n\nExpected format: \`%s/facility/<facility-id>/settings/locations/<location-id>\`\n\nURL submitted: \`%s\`" \
+            "$CARE_FE_BASE_URL" "$LOCATION_URL")
+
+          jq -n \
+            --arg status "failure" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+          echo "skip_checks=true" >> $GITHUB_ENV
+
+      - name: Validate facility ownership in URL
+        if: env.skip_checks != 'true' && steps.parse.outputs.url_facility_id != steps.setup.outputs.expected_facility_id
+        env:
+          URL_FACILITY_ID: ${{ steps.parse.outputs.url_facility_id }}
+          EXPECTED_FACILITY_ID: ${{ steps.setup.outputs.expected_facility_id }}
+        run: |
+          FEEDBACK=$(printf "Uh oh! The URL you submitted points to a different facility than the one you created in the previous assignment.\n\nExpected facility id: %s\nFacility id in your URL: %s\n\nMake sure you create the beds inside your own facility." \
+            "$EXPECTED_FACILITY_ID" "$URL_FACILITY_ID")
+
+          jq -n \
+            --arg status "failure" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+          echo "skip_checks=true" >> $GITHUB_ENV
+
+      - name: Validate room ownership in URL
+        if: env.skip_checks != 'true' && steps.parse.outputs.url_location_id != steps.setup.outputs.expected_room_id
+        env:
+          URL_LOCATION_ID: ${{ steps.parse.outputs.url_location_id }}
+          EXPECTED_ROOM_ID: ${{ steps.setup.outputs.expected_room_id }}
+        run: |
+          FEEDBACK=$(printf "Uh oh! The URL you submitted points to a different location than the room you created in the Create Location assignment.\n\nExpected room id: %s\nLocation id in your URL: %s\n\nNavigate to your room location (not Ground Floor) and copy the URL from there." \
+            "$EXPECTED_ROOM_ID" "$URL_LOCATION_ID")
+
+          jq -n \
+            --arg status "failure" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+          echo "skip_checks=true" >> $GITHUB_ENV
+
+      - name: Check bed requirements
+        if: env.skip_checks != 'true'
+        id: check
+        uses: ohc-vta/care-actions/check-api@main
+        env:
+          CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
+          CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
+        with:
+          endpoint: "/api/v1/facility/${{ steps.parse.outputs.url_facility_id }}/location/?parent=${{ steps.parse.outputs.url_location_id }}&form=bd&mode=instance&limit=10"
+          method: GET
+          jq-filter: |
+            [
+              (.count == 4),
+              (.results | all(.status == "active")),
+              (.results | all(.operational_status == "U")),
+              (.results | all((.description // "") | length > 0)),
+              (.results | any(.name == "Bed 1")),
+              (.results | any(.name == "Bed 2")),
+              (.results | any(.name == "Bed 3")),
+              (.results | any(.name == "Full Electric Bed"))
+            ] | map(select(.)) | length
+          assertion: equals
+          expected: "8"
+          label: "All bed requirements met"
+          output-jq-filter: |
+            {
+              bed_count: .count,
+              all_active: (.results | all(.status == "active")),
+              all_unoccupied: (.results | all(.operational_status == "U")),
+              all_described: (.results | all((.description // "") | length > 0)),
+              has_bed1: (.results | any(.name == "Bed 1")),
+              has_bed2: (.results | any(.name == "Bed 2")),
+              has_bed3: (.results | any(.name == "Bed 3")),
+              has_full_electric: (.results | any(.name == "Full Electric Bed"))
+            }
+
+      - name: Build feedback
+        if: env.skip_checks != 'true'
+        env:
+          RESULT: ${{ steps.check.outputs.result }}
+          RESULTS: ${{ steps.check.outputs.extracted }}
+          PASSED: ${{ steps.check.outputs.passed }}
+        run: |
+          # API call failed
+          if echo "$RESULT" | grep -q '^error:'; then
+            FEEDBACK=$(printf "Uh oh! We couldn't fetch the beds from CARE.\n\nDetails: %s\n\nMake sure the URL you submitted is correct and that the beds haven't been deleted. Expected URL format: \`%s/facility/<facility-id>/settings/locations/<location-id>\`" \
+              "$RESULT" "$CARE_FE_BASE_URL")
+
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            exit 0
+          fi
+
+          # map results to check flags
+          T1="✗"; T2="✗"; T3="✗"; T4="✗"; T5="✗"; T6="✗"; T7="✗"; T8="✗"
+          BED_COUNT=$(echo "$RESULTS" | jq -r '.bed_count // "unknown"')
+          [ "$BED_COUNT"                                             = "4"    ] && T1="✓"
+          [ "$(echo "$RESULTS" | jq -r '.all_active')"              = "true" ] && T2="✓"
+          [ "$(echo "$RESULTS" | jq -r '.all_unoccupied')"          = "true" ] && T3="✓"
+          [ "$(echo "$RESULTS" | jq -r '.all_described')"           = "true" ] && T4="✓"
+          [ "$(echo "$RESULTS" | jq -r '.has_bed1')"                = "true" ] && T5="✓"
+          [ "$(echo "$RESULTS" | jq -r '.has_bed2')"                = "true" ] && T6="✓"
+          [ "$(echo "$RESULTS" | jq -r '.has_bed3')"                = "true" ] && T7="✓"
+          [ "$(echo "$RESULTS" | jq -r '.has_full_electric')"       = "true" ] && T8="✓"
+
+          if [ "$PASSED" = "true" ]; then
+            HEADER="Great work! All checks passed. Your beds meet all the requirements."
+            STATUS="success"
+          else
+            HEADER="Uh oh! It looks like you've missed some parts of the assignment. Here are the results of the tests that we ran. A tick (✓) indicates a successful test, and a cross (✗) indicates a failed test."
+            STATUS="failure"
+          fi
+
+          FEEDBACK=$(printf "%s\n\n%s Exactly 4 beds should be created in the room location (found: %s)\n\n%s All beds should have Status \"Active\"\n\n%s All beds should have Operational Status \"Unoccupied\"\n\n%s All beds should have a description\n\n%s A bed named exactly \"Bed 1\" should exist\n\n%s A bed named exactly \"Bed 2\" should exist\n\n%s A bed named exactly \"Bed 3\" should exist\n\n%s A bed named exactly \"Full Electric Bed\" should exist\n\nPlease make sure that you go through the assignment instructions and verify your bed settings in CARE. If you're having trouble with this assignment, refer to the course materials and provided guidelines." \
+            "$HEADER" "$T1" "$BED_COUNT" "$T2" "$T3" "$T4" "$T5" "$T6" "$T7" "$T8")
+
+          jq -n \
+            --arg status "$STATUS" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+      - name: Grade submission
+        if: always()
+        uses: pupilfirst/grade-action@v1
+        with:
+          report_file_path: "report.json"
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+
+      - name: Report success to LMS
+        if: success()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "success"
+          description: "Beds evaluation completed."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+
+      - name: Report failure to LMS
+        if: failure()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "error"
+          description: "Beds evaluation failed unexpectedly. Please resubmit or contact support."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
