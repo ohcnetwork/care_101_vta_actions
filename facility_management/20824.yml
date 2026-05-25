@@ -5,7 +5,7 @@ on:
     branches: ["submission-*"]
 
 jobs:
-  evaluate:
+  evaluate_department:
     runs-on: ubuntu-latest
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
@@ -76,7 +76,7 @@ jobs:
           echo "submission_id=$SUBMISSION_ID" >> $GITHUB_OUTPUT
           echo "department_url=$DEPARTMENT_URL" >> $GITHUB_OUTPUT
 
-          # reject URLs not from the CARE frontend
+          # Reject URLs not pointing at the configured CARE front-end
           case "$DEPARTMENT_URL" in
             "$CARE_FE_BASE_URL"/*)
               ;;
