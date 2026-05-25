@@ -1,21 +1,21 @@
 name: Create Department Evaluation
+
 on:
   push:
     branches: ["submission-*"]
 
 jobs:
-  evaluate:
+  evaluate_department:
     runs-on: ubuntu-latest
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
       CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.CARE_GITHUB_ACTION_TOKEN }}
 
-      # ── Fetch setup_data.json from main branch ──
       - name: Fetch setup data from main
         id: setup
         run: |
@@ -24,17 +24,13 @@ jobs:
           USER_ID=$(jq -r '.user.id' setup_data.json)
           EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
 
-          # Missing user.id is a course-config bug (bootstrap action didn't run) —
-          # not student-recoverable, so fail hard and surface in CI logs.
+          # missing user.id: bootstrap did not run, not student-recoverable
           if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
             echo "::error::Could not read user.id from setup_data.json"
             exit 1
           fi
 
-          # Missing facility_id IS student-recoverable: the previous target
-          # (Create Facility) hasn't been *passed* yet. Pupilfirst lets students
-          # submit this target after merely *submitting* the prerequisite, so we
-          # need to give actionable feedback here instead of failing the job.
+          # missing facility_id: Create Facility hasn't passed yet, surface feedback
           if [ -z "$EXPECTED_FACILITY_ID" ] || [ "$EXPECTED_FACILITY_ID" = "null" ]; then
             FEEDBACK="Please pass the **Create Facility** target first. Submitting it isn't enough — it needs a passing grade so this evaluation can verify the department belongs to your facility."
             jq -n \
@@ -48,8 +44,6 @@ jobs:
           echo "user_id=$USER_ID" >> $GITHUB_OUTPUT
           echo "expected_facility_id=$EXPECTED_FACILITY_ID" >> $GITHUB_OUTPUT
 
-      # ── Single source of truth for the allowed department names ──
-      # Used by the jq filters (grading) and the human-readable feedback message.
       - name: Define allowed department names
         id: depts
         run: |
@@ -65,14 +59,13 @@ jobs:
             "Laboratory"
             "Emergency"
           )
-          # jq IN(...) argument list: "Cardiology","Neurology",...
+          # formatted for jq IN()
           JQ_LIST=$(printf '%s\n' "${NAMES[@]}" | jq -R . | paste -sd, -)
-          # Human-readable list: Cardiology, Neurology, ...
+          # formatted for feedback
           HUMAN=$(IFS=, ; printf '%s' "${NAMES[*]}" | sed 's/,/, /g')
           echo "jq_list=$JQ_LIST" >> $GITHUB_OUTPUT
           echo "human=$HUMAN" >> $GITHUB_OUTPUT
 
-      # ── Parse department URL from submission ──
       - name: Parse submission data
         if: env.skip_checks != 'true'
         id: parse
@@ -94,7 +87,6 @@ jobs:
               ;;
           esac
 
-          # Extract facility_id and department_id from URL
           # URL format: <CARE_FE_BASE_URL>/facility/{facility_id}/settings/departments/{department_id}/departments
           UUID_RE='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
 
@@ -111,7 +103,6 @@ jobs:
           echo "department_id=$DEPARTMENT_ID" >> $GITHUB_OUTPUT
           echo "valid=true" >> $GITHUB_OUTPUT
 
-      # ── Validate URL was parsed successfully ──
       - name: Validate parsed URL
         if: env.skip_checks != 'true' && steps.parse.outputs.valid != 'true'
         env:
@@ -127,7 +118,6 @@ jobs:
 
           echo "skip_checks=true" >> $GITHUB_ENV
 
-      # ── Validate the URL's facility_id matches the student's facility from the previous target ──
       - name: Validate facility ownership in URL
         if: env.skip_checks != 'true' && steps.parse.outputs.url_facility_id != steps.setup.outputs.expected_facility_id
         env:
@@ -144,7 +134,6 @@ jobs:
 
           echo "skip_checks=true" >> $GITHUB_ENV
 
-      # ── Single API call: check all 4 conditions ──
       - name: Check department requirements
         if: env.skip_checks != 'true'
         id: check
@@ -167,13 +156,13 @@ jobs:
           label: "All department requirements met"
           output-jq-filter: |
             {
+              dept_name: (.name // ""),
               name: ((.name // "") | IN(${{ steps.depts.outputs.jq_list }})),
               type: (.org_type == "dept"),
               not_system: (.system_generated == false),
               creator: (.created_by.id == "${{ steps.setup.outputs.user_id }}")
             }
 
-      # ── Build feedback from check results ──
       - name: Build feedback
         if: env.skip_checks != 'true'
         env:
@@ -182,7 +171,6 @@ jobs:
           PASSED: ${{ steps.check.outputs.passed }}
           ALLOWED_HUMAN: ${{ steps.depts.outputs.human }}
         run: |
-          # Differentiated message when the API call itself failed (e.g. 404)
           if echo "$RESULT" | grep -q '^error:'; then
             FEEDBACK=$(printf "Uh oh! We couldn't fetch your department from CARE.\n\nDetails: %s\n\nMake sure the department URL you submitted is correct and that the department hasn't been deleted. Expected URL format: \`%s/facility/<facility-id>/settings/departments/<department-id>/departments\`" \
               "$RESULT" "$CARE_FE_BASE_URL")
@@ -194,12 +182,12 @@ jobs:
             exit 0
           fi
 
-          # Parse individual results
+          # map results to check flags
           T1="✗"; T2="✗"; T3="✗"; T4="✗"
-          [ "$(echo "$RESULTS" | jq -r '.name')"       = "true" ] && T1="✓"
-          [ "$(echo "$RESULTS" | jq -r '.type')"       = "true" ] && T2="✓"
+          [ "$(echo "$RESULTS" | jq -r '.name')" = "true" ] && T1="✓"
+          [ "$(echo "$RESULTS" | jq -r '.type')" = "true" ] && T2="✓"
           [ "$(echo "$RESULTS" | jq -r '.not_system')" = "true" ] && T3="✓"
-          [ "$(echo "$RESULTS" | jq -r '.creator')"    = "true" ] && T4="✓"
+          [ "$(echo "$RESULTS" | jq -r '.creator')" = "true" ] && T4="✓"
 
           if [ "$PASSED" = "true" ]; then
             HEADER="Great work! All checks passed. Your department meets all the requirements."
@@ -217,7 +205,40 @@ jobs:
             --arg feedback "$FEEDBACK" \
             '{status: $status, feedback: $feedback}' > report.json
 
-      # ── Grade via grade-action ──
+      - name: Persist department name to setup_data.json
+        if: env.skip_checks != 'true' && steps.check.outputs.passed == 'true'
+        env:
+          EXTRACTED: ${{ steps.check.outputs.extracted }}
+          SUBMISSION_ID: ${{ steps.parse.outputs.submission_id }}
+        run: |
+          DEPT_NAME=$(echo "$EXTRACTED" | jq -r '.dept_name')
+
+          # switch to main
+          git fetch origin main
+          git checkout -B main origin/main
+
+          # update setup_data.json
+          jq --arg name "$DEPT_NAME" \
+             '. as $root | (.facility_management // {}) as $fm
+              | $root + {facility_management: ($fm + {department_name: $name})}' \
+             setup_data.json > setup_data.json.tmp
+          mv setup_data.json.tmp setup_data.json
+
+          if git diff --quiet setup_data.json; then
+            echo "setup_data.json already up to date; nothing to commit."
+            git checkout "$GITHUB_REF_NAME"
+            exit 0
+          fi
+
+          git config user.name "HMIS bot"
+          git config user.email "hmiscare@gmail.com"
+          git add setup_data.json
+          git commit -m "chore(setup): record facility_management.department_name (submission $SUBMISSION_ID) [skip ci]"
+          git push origin main
+
+          # restore submission branch
+          git checkout "$GITHUB_REF_NAME"
+
       - name: Grade submission
         if: always()
         uses: pupilfirst/grade-action@v1
@@ -227,7 +248,6 @@ jobs:
           REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
           REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
 
-      # ── Report result to LMS ──
       - name: Report success to LMS
         if: success()
         uses: pupilfirst/report-action@v1
