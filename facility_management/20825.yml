@@ -154,14 +154,14 @@ jobs:
           label: "All location requirements met"
           output-jq-filter: |
             {
-              casualty_id: .id,
+              room_id: .id,
               ground_floor_id: ((.parent // {}) | .id // ""),
-              casualty_name: (.name == "${{ steps.setup.outputs.department_name }}"),
-              casualty_form: (.form == "ro"),
-              casualty_status: (.status == "active"),
-              casualty_op_status: (.operational_status == "U"),
-              casualty_description: ((.description // "") | length > 0),
-              casualty_creator: (.created_by.id == "${{ steps.setup.outputs.user_id }}"),
+              room_name: (.name == "${{ steps.setup.outputs.department_name }}"),
+              room_form: (.form == "ro"),
+              room_status: (.status == "active"),
+              room_op_status: (.operational_status == "U"),
+              room_description: ((.description // "") | length > 0),
+              room_creator: (.created_by.id == "${{ steps.setup.outputs.user_id }}"),
               ground_floor_name: ((.parent // {}) | .name == "Ground Floor"),
               ground_floor_form: ((.parent // {}) | .form == "lvl"),
               ground_floor_status: ((.parent // {}) | .status == "active"),
@@ -191,12 +191,12 @@ jobs:
           # map results to check flags
           T1="✗"; T2="✗"; T3="✗"; T4="✗"; T5="✗"; T6="✗"
           T7="✗"; T8="✗"; T9="✗"; T10="✗"; T11="✗"
-          [ "$(echo "$RESULTS" | jq -r '.casualty_name')"            = "true" ] && T1="✓"
-          [ "$(echo "$RESULTS" | jq -r '.casualty_form')"            = "true" ] && T2="✓"
-          [ "$(echo "$RESULTS" | jq -r '.casualty_status')"          = "true" ] && T3="✓"
-          [ "$(echo "$RESULTS" | jq -r '.casualty_op_status')"       = "true" ] && T4="✓"
-          [ "$(echo "$RESULTS" | jq -r '.casualty_description')"     = "true" ] && T5="✓"
-          [ "$(echo "$RESULTS" | jq -r '.casualty_creator')"         = "true" ] && T6="✓"
+          [ "$(echo "$RESULTS" | jq -r '.room_name')"            = "true" ] && T1="✓"
+          [ "$(echo "$RESULTS" | jq -r '.room_form')"            = "true" ] && T2="✓"
+          [ "$(echo "$RESULTS" | jq -r '.room_status')"          = "true" ] && T3="✓"
+          [ "$(echo "$RESULTS" | jq -r '.room_op_status')"       = "true" ] && T4="✓"
+          [ "$(echo "$RESULTS" | jq -r '.room_description')"     = "true" ] && T5="✓"
+          [ "$(echo "$RESULTS" | jq -r '.room_creator')"         = "true" ] && T6="✓"
           [ "$(echo "$RESULTS" | jq -r '.ground_floor_name')"        = "true" ] && T7="✓"
           [ "$(echo "$RESULTS" | jq -r '.ground_floor_form')"        = "true" ] && T8="✓"
           [ "$(echo "$RESULTS" | jq -r '.ground_floor_status')"      = "true" ] && T9="✓"
@@ -225,7 +225,7 @@ jobs:
           EXTRACTED: ${{ steps.check.outputs.extracted }}
           SUBMISSION_ID: ${{ steps.parse.outputs.submission_id }}
         run: |
-          CASUALTY_ID=$(echo "$EXTRACTED" | jq -r '.casualty_id')
+          ROOM_ID=$(echo "$EXTRACTED" | jq -r '.room_id')
           GROUND_FLOOR_ID=$(echo "$EXTRACTED" | jq -r '.ground_floor_id')
 
           # switch to main
@@ -233,10 +233,10 @@ jobs:
           git checkout -B main origin/main
 
           # update setup_data.json
-          jq --arg cid "$CASUALTY_ID" \
+          jq --arg rid "$ROOM_ID" \
              --arg gfid "$GROUND_FLOOR_ID" \
              '. as $root | (.location_management // {}) as $lm
-              | $root + {location_management: ($lm + {ground_floor_id: $gfid, casualty_id: $cid})}' \
+              | $root + {location_management: ($lm + {ground_floor_id: $gfid, room_id: $rid})}' \
              setup_data.json > setup_data.json.tmp
           mv setup_data.json.tmp setup_data.json
 
