@@ -5,7 +5,7 @@ on:
     branches: ["submission-*"]
 
 jobs:
-  evaluate:
+  evaluate_beds:
     runs-on: ubuntu-latest
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
@@ -23,7 +23,7 @@ jobs:
           git checkout origin/main -- setup_data.json
           USER_ID=$(jq -r '.user.id' setup_data.json)
           EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
-          EXPECTED_ROOM_ID=$(jq -r '.location_management.casualty_id // empty' setup_data.json)
+          EXPECTED_ROOM_ID=$(jq -r '.location_management.room_id // empty' setup_data.json)
 
           # missing user.id: bootstrap did not run, not student-recoverable
           if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
