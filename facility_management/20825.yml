@@ -5,7 +5,7 @@ on:
     branches: ["submission-*"]
 
 jobs:
-  evaluate:
+  evaluate_location:
     runs-on: ubuntu-latest
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
@@ -221,39 +221,18 @@ jobs:
 
       - name: Persist location IDs to setup_data.json
         if: env.skip_checks != 'true' && steps.check.outputs.passed == 'true'
-        env:
-          EXTRACTED: ${{ steps.check.outputs.extracted }}
-          SUBMISSION_ID: ${{ steps.parse.outputs.submission_id }}
-        run: |
-          ROOM_ID=$(echo "$EXTRACTED" | jq -r '.room_id')
-          GROUND_FLOOR_ID=$(echo "$EXTRACTED" | jq -r '.ground_floor_id')
-
-          # switch to main
-          git fetch origin main
-          git checkout -B main origin/main
-
-          # update setup_data.json
-          jq --arg rid "$ROOM_ID" \
-             --arg gfid "$GROUND_FLOOR_ID" \
-             '. as $root | (.location_management // {}) as $lm
-              | $root + {location_management: ($lm + {ground_floor_id: $gfid, room_id: $rid})}' \
-             setup_data.json > setup_data.json.tmp
-          mv setup_data.json.tmp setup_data.json
-
-          if git diff --quiet setup_data.json; then
-            echo "setup_data.json already up to date; nothing to commit."
-            git checkout "$GITHUB_REF_NAME"
-            exit 0
-          fi
-
-          git config user.name "HMIS bot"
-          git config user.email "hmiscare@gmail.com"
-          git add setup_data.json
-          git commit -m "chore(setup): record location_management IDs (submission $SUBMISSION_ID) [skip ci]"
-          git push origin main
-
-          # restore submission branch
-          git checkout "$GITHUB_REF_NAME"
+        continue-on-error: true
+        uses: ohc-vta/care-actions/persist-setup-data@main
+        with:
+          submission-id: ${{ steps.parse.outputs.submission_id }}
+          commit-message: "chore(setup): record location_management IDs (submission ${{ steps.parse.outputs.submission_id }})"
+          jq-args: |
+            rid=${{ fromJSON(steps.check.outputs.extracted).room_id }}
+            gfid=${{ fromJSON(steps.check.outputs.extracted).ground_floor_id }}
+          jq-merge: |
+            . as $root | (.location_management // {}) as $lm
+            | $root + {location_management: ($lm + {ground_floor_id: $gfid, room_id: $rid})}
+          alert-context: "location_management.room_id=${{ fromJSON(steps.check.outputs.extracted).room_id }}, location_management.ground_floor_id=${{ fromJSON(steps.check.outputs.extracted).ground_floor_id }}"
 
       - name: Grade submission
         if: always()

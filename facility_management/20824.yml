@@ -207,37 +207,17 @@ jobs:
 
       - name: Persist department name to setup_data.json
         if: env.skip_checks != 'true' && steps.check.outputs.passed == 'true'
-        env:
-          EXTRACTED: ${{ steps.check.outputs.extracted }}
-          SUBMISSION_ID: ${{ steps.parse.outputs.submission_id }}
-        run: |
-          DEPT_NAME=$(echo "$EXTRACTED" | jq -r '.dept_name')
-
-          # switch to main
-          git fetch origin main
-          git checkout -B main origin/main
-
-          # update setup_data.json
-          jq --arg name "$DEPT_NAME" \
-             '. as $root | (.facility_management // {}) as $fm
-              | $root + {facility_management: ($fm + {department_name: $name})}' \
-             setup_data.json > setup_data.json.tmp
-          mv setup_data.json.tmp setup_data.json
-
-          if git diff --quiet setup_data.json; then
-            echo "setup_data.json already up to date; nothing to commit."
-            git checkout "$GITHUB_REF_NAME"
-            exit 0
-          fi
-
-          git config user.name "HMIS bot"
-          git config user.email "hmiscare@gmail.com"
-          git add setup_data.json
-          git commit -m "chore(setup): record facility_management.department_name (submission $SUBMISSION_ID) [skip ci]"
-          git push origin main
-
-          # restore submission branch
-          git checkout "$GITHUB_REF_NAME"
+        continue-on-error: true
+        uses: ohc-vta/care-actions/persist-setup-data@main
+        with:
+          submission-id: ${{ steps.parse.outputs.submission_id }}
+          commit-message: "chore(setup): record facility_management.department_name (submission ${{ steps.parse.outputs.submission_id }})"
+          jq-args: |
+            name=${{ fromJSON(steps.check.outputs.extracted).dept_name }}
+          jq-merge: |
+            . as $root | (.facility_management // {}) as $fm
+            | $root + {facility_management: ($fm + {department_name: $name})}
+          alert-context: "facility_management.department_name=${{ fromJSON(steps.check.outputs.extracted).dept_name }}"
 
       - name: Grade submission
         if: always()
