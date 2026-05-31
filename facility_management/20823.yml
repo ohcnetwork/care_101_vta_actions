@@ -176,35 +176,17 @@ jobs:
       # ── Persist facility_id to setup_data.json on main (only when all checks pass) ──
       - name: Persist facility_id to setup_data.json
         if: env.skip_checks != 'true' && steps.check.outputs.passed == 'true'
-        env:
-          FACILITY_ID: ${{ steps.parse.outputs.facility_id }}
-          SUBMISSION_ID: ${{ steps.parse.outputs.submission_id }}
-        run: |
-          # Switch to main, ensuring a clean checkout
-          git fetch origin main
-          git checkout -B main origin/main
-
-          # Merge facility_management.facility_id into setup_data.json (preserves any other keys)
-          jq --arg fid "$FACILITY_ID" \
-             '. as $root | (.facility_management // {}) as $fm
-              | $root + {facility_management: ($fm + {facility_id: $fid})}' \
-             setup_data.json > setup_data.json.tmp
-          mv setup_data.json.tmp setup_data.json
-
-          if git diff --quiet setup_data.json; then
-            echo "setup_data.json already up to date; nothing to commit."
-            git checkout "$GITHUB_REF_NAME"
-            exit 0
-          fi
-
-          git config user.name "HMIS bot"
-          git config user.email "hmiscare@gmail.com"
-          git add setup_data.json
-          git commit -m "chore(setup): record facility_management.facility_id (submission $SUBMISSION_ID) [skip ci]"
-          git push origin main
-
-          # Switch back to the submission branch so subsequent steps see submission.json
-          git checkout "$GITHUB_REF_NAME"
+        continue-on-error: true
+        uses: ohc-vta/care-actions/persist-setup-data@main
+        with:
+          submission-id: ${{ steps.parse.outputs.submission_id }}
+          commit-message: "chore(setup): record facility_management.facility_id (submission ${{ steps.parse.outputs.submission_id }})"
+          jq-args: |
+            fid=${{ steps.parse.outputs.facility_id }}
+          jq-merge: |
+            . as $root | (.facility_management // {}) as $fm
+            | $root + {facility_management: ($fm + {facility_id: $fid})}
+          alert-context: "facility_management.facility_id=${{ steps.parse.outputs.facility_id }}"
 
       # ── Grade via grade-action ──
       - name: Grade submission
