@@ -4,14 +4,14 @@ on:
     branches: ["submission-*"]
 
 jobs:
-  evaluate:
+  evaluate_facility:
     runs-on: ubuntu-latest
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
       CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.CARE_GITHUB_ACTION_TOKEN }}
 
