@@ -1,0 +1,266 @@
+name: Create Location Evaluation
+
+on:
+  push:
+    branches: ["submission-*"]
+
+jobs:
+  evaluate_location:
+    runs-on: ubuntu-latest
+    env:
+      CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
+      CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.CARE_GITHUB_ACTION_TOKEN }}
+
+      - name: Fetch setup data from main
+        id: setup
+        run: |
+          git fetch origin main
+          git checkout origin/main -- setup_data.json
+          USER_ID=$(jq -r '.user.id' setup_data.json)
+          EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
+          DEPT_NAME=$(jq -r '.facility_management.department_name // empty' setup_data.json)
+
+          # missing user.id: bootstrap did not run, not student-recoverable
+          if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
+            echo "::error::Could not read user.id from setup_data.json"
+            exit 1
+          fi
+
+          # missing facility_id: Create Facility hasn't passed yet, surface feedback
+          if [ -z "$EXPECTED_FACILITY_ID" ] || [ "$EXPECTED_FACILITY_ID" = "null" ]; then
+            FEEDBACK="Please pass the **Create Facility** target first. Submitting it isn't enough — it needs a passing grade so this evaluation can verify the locations belong to your facility."
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            echo "skip_checks=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # missing department_name: Create Department hasn't passed yet, surface feedback
+          if [ -z "$DEPT_NAME" ] || [ "$DEPT_NAME" = "null" ]; then
+            FEEDBACK="Please pass the **Create Department** target first. The room location name must match the department name you chose in that assignment."
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            echo "skip_checks=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "user_id=$USER_ID" >> $GITHUB_OUTPUT
+          echo "expected_facility_id=$EXPECTED_FACILITY_ID" >> $GITHUB_OUTPUT
+          echo "department_name=$DEPT_NAME" >> $GITHUB_OUTPUT
+
+      - name: Parse submission data
+        if: env.skip_checks != 'true'
+        id: parse
+        run: |
+          SUBMISSION_ID=$(jq -r '.id' submission.json)
+          LOCATION_URL=$(jq -r '.checklist[1].result' submission.json)
+
+          echo "submission_id=$SUBMISSION_ID" >> $GITHUB_OUTPUT
+          echo "location_url=$LOCATION_URL" >> $GITHUB_OUTPUT
+
+          # reject URLs not from the CARE frontend
+          case "$LOCATION_URL" in
+            "$CARE_FE_BASE_URL"/*)
+              ;;
+            *)
+              echo "::error::URL does not start with $CARE_FE_BASE_URL: $LOCATION_URL"
+              echo "valid=false" >> $GITHUB_OUTPUT
+              exit 0
+              ;;
+          esac
+
+          # URL format: <CARE_FE_BASE_URL>/facility/{facility_id}/settings/locations/{location_id}
+          UUID_RE='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+
+          URL_FACILITY_ID=$(echo "$LOCATION_URL" | sed -nE "s|.*/facility/($UUID_RE)/settings/locations/.*|\1|p")
+          LOCATION_ID=$(echo "$LOCATION_URL" | sed -nE "s|.*/facility/$UUID_RE/settings/locations/($UUID_RE).*|\1|p")
+
+          if [ -z "$URL_FACILITY_ID" ] || [ -z "$LOCATION_ID" ]; then
+            echo "::error::Could not parse facility_id and location_id from URL: $LOCATION_URL"
+            echo "valid=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "url_facility_id=$URL_FACILITY_ID" >> $GITHUB_OUTPUT
+          echo "location_id=$LOCATION_ID" >> $GITHUB_OUTPUT
+          echo "valid=true" >> $GITHUB_OUTPUT
+
+      - name: Validate parsed URL
+        if: env.skip_checks != 'true' && steps.parse.outputs.valid != 'true'
+        env:
+          LOCATION_URL: ${{ steps.parse.outputs.location_url }}
+        run: |
+          FEEDBACK=$(printf "Uh oh! The location URL you submitted could not be parsed. After creating the room location, click on it to open its detail page and copy the URL from your browser address bar.\n\nExpected format: \`%s/facility/<facility-id>/settings/locations/<location-id>\`\n\nURL submitted: \`%s\`" \
+            "$CARE_FE_BASE_URL" "$LOCATION_URL")
+
+          jq -n \
+            --arg status "failure" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+          echo "skip_checks=true" >> $GITHUB_ENV
+
+      - name: Validate facility ownership in URL
+        if: env.skip_checks != 'true' && steps.parse.outputs.url_facility_id != steps.setup.outputs.expected_facility_id
+        env:
+          URL_FACILITY_ID: ${{ steps.parse.outputs.url_facility_id }}
+          EXPECTED_FACILITY_ID: ${{ steps.setup.outputs.expected_facility_id }}
+        run: |
+          FEEDBACK=$(printf "Uh oh! The location URL you submitted points to a different facility than the one you created in the previous assignment.\n\nExpected facility id: %s\nFacility id in your URL: %s\n\nMake sure you create the locations inside your own facility, and submit the URL of the room location." \
+            "$EXPECTED_FACILITY_ID" "$URL_FACILITY_ID")
+
+          jq -n \
+            --arg status "failure" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+          echo "skip_checks=true" >> $GITHUB_ENV
+
+      - name: Check location requirements
+        if: env.skip_checks != 'true'
+        id: check
+        uses: ohc-vta/care-actions/check-api@main
+        env:
+          CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
+          CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
+        with:
+          endpoint: "/api/v1/facility/${{ steps.parse.outputs.url_facility_id }}/location/${{ steps.parse.outputs.location_id }}/"
+          method: GET
+          jq-filter: |
+            [
+              (.name == "${{ steps.setup.outputs.department_name }}"),
+              (.form == "ro"),
+              (.status == "active"),
+              (.operational_status == "U"),
+              ((.description // "") | length > 0),
+              (.created_by.id == "${{ steps.setup.outputs.user_id }}"),
+              ((.parent // {}) | .name == "Ground Floor"),
+              ((.parent // {}) | .form == "lvl"),
+              ((.parent // {}) | .status == "active"),
+              ((.parent // {}) | .operational_status == "U"),
+              ((.parent // {}) | ((.description // "") | length > 0))
+            ] | map(select(.)) | length
+          assertion: equals
+          expected: "11"
+          label: "All location requirements met"
+          output-jq-filter: |
+            {
+              room_id: .id,
+              ground_floor_id: ((.parent // {}) | .id // ""),
+              room_name: (.name == "${{ steps.setup.outputs.department_name }}"),
+              room_form: (.form == "ro"),
+              room_status: (.status == "active"),
+              room_op_status: (.operational_status == "U"),
+              room_description: ((.description // "") | length > 0),
+              room_creator: (.created_by.id == "${{ steps.setup.outputs.user_id }}"),
+              ground_floor_name: ((.parent // {}) | .name == "Ground Floor"),
+              ground_floor_form: ((.parent // {}) | .form == "lvl"),
+              ground_floor_status: ((.parent // {}) | .status == "active"),
+              ground_floor_op_status: ((.parent // {}) | .operational_status == "U"),
+              ground_floor_description: ((.parent // {}) | ((.description // "") | length > 0))
+            }
+
+      - name: Build feedback
+        if: env.skip_checks != 'true'
+        env:
+          RESULT: ${{ steps.check.outputs.result }}
+          RESULTS: ${{ steps.check.outputs.extracted }}
+          PASSED: ${{ steps.check.outputs.passed }}
+          DEPT_NAME: ${{ steps.setup.outputs.department_name }}
+        run: |
+          if echo "$RESULT" | grep -q '^error:'; then
+            FEEDBACK=$(printf "Uh oh! We couldn't fetch your location from CARE.\n\nDetails: %s\n\nMake sure the location URL you submitted is correct and that the location hasn't been deleted. Expected URL format: \`%s/facility/<facility-id>/settings/locations/<location-id>\`" \
+              "$RESULT" "$CARE_FE_BASE_URL")
+
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            exit 0
+          fi
+
+          # map results to check flags
+          T1="✗"; T2="✗"; T3="✗"; T4="✗"; T5="✗"; T6="✗"
+          T7="✗"; T8="✗"; T9="✗"; T10="✗"; T11="✗"
+          [ "$(echo "$RESULTS" | jq -r '.room_name')"            = "true" ] && T1="✓"
+          [ "$(echo "$RESULTS" | jq -r '.room_form')"            = "true" ] && T2="✓"
+          [ "$(echo "$RESULTS" | jq -r '.room_status')"          = "true" ] && T3="✓"
+          [ "$(echo "$RESULTS" | jq -r '.room_op_status')"       = "true" ] && T4="✓"
+          [ "$(echo "$RESULTS" | jq -r '.room_description')"     = "true" ] && T5="✓"
+          [ "$(echo "$RESULTS" | jq -r '.room_creator')"         = "true" ] && T6="✓"
+          [ "$(echo "$RESULTS" | jq -r '.ground_floor_name')"        = "true" ] && T7="✓"
+          [ "$(echo "$RESULTS" | jq -r '.ground_floor_form')"        = "true" ] && T8="✓"
+          [ "$(echo "$RESULTS" | jq -r '.ground_floor_status')"      = "true" ] && T9="✓"
+          [ "$(echo "$RESULTS" | jq -r '.ground_floor_op_status')"   = "true" ] && T10="✓"
+          [ "$(echo "$RESULTS" | jq -r '.ground_floor_description')" = "true" ] && T11="✓"
+
+          if [ "$PASSED" = "true" ]; then
+            HEADER="Great work! All checks passed. Your locations meet all the requirements."
+            STATUS="success"
+            FOOTER=""
+          else
+            HEADER="Uh oh! It looks like you've missed some parts of the assignment. Here are the results of the tests that we ran. A tick (✓) indicates a successful test, and a cross (✗) indicates a failed test."
+            STATUS="failure"
+            FOOTER=$'\n\nPlease make sure that you go through the assignment instructions and verify your location settings in CARE. If you\'re having trouble with this assignment, refer to the course materials and provided guidelines.'
+          fi
+
+          FEEDBACK=$(printf "%s\n\n**Room location** (the URL you submitted):\n\n%s Name should match your department name exactly: \"%s\"\n\n%s Location Form should be \"Room\"\n\n%s Status should be \"Active\"\n\n%s Operational Status should be \"Unoccupied\"\n\n%s Description should not be empty\n\n%s Location should be created by you (using the credentials assigned to you)\n\n**Ground Floor** (parent location):\n\n%s Name should be exactly \"Ground Floor\"\n\n%s Location Form should be \"Level\"\n\n%s Status should be \"Active\"\n\n%s Operational Status should be \"Unoccupied\"\n\n%s Description should not be empty%s" \
+            "$HEADER" "$T1" "$DEPT_NAME" "$T2" "$T3" "$T4" "$T5" "$T6" "$T7" "$T8" "$T9" "$T10" "$T11" "$FOOTER")
+
+          jq -n \
+            --arg status "$STATUS" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+      - name: Persist location IDs to setup_data.json
+        if: env.skip_checks != 'true' && steps.check.outputs.passed == 'true'
+        continue-on-error: true
+        uses: ohc-vta/care-actions/persist-setup-data@main
+        with:
+          submission-id: ${{ steps.parse.outputs.submission_id }}
+          commit-message: "chore(setup): record location_management IDs (submission ${{ steps.parse.outputs.submission_id }})"
+          jq-args: |
+            rid=${{ fromJSON(steps.check.outputs.extracted).room_id }}
+            gfid=${{ fromJSON(steps.check.outputs.extracted).ground_floor_id }}
+          jq-merge: |
+            . as $root | (.location_management // {}) as $lm
+            | $root + {location_management: ($lm + {ground_floor_id: $gfid, room_id: $rid})}
+          alert-context: "location_management.room_id=${{ fromJSON(steps.check.outputs.extracted).room_id }}, location_management.ground_floor_id=${{ fromJSON(steps.check.outputs.extracted).ground_floor_id }}"
+
+      - name: Grade submission
+        if: always()
+        uses: pupilfirst/grade-action@v1
+        with:
+          report_file_path: "report.json"
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+
+      - name: Report success to LMS
+        if: success()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "success"
+          description: "Location evaluation completed."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+
+      - name: Report failure to LMS
+        if: failure()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "error"
+          description: "Location evaluation failed unexpectedly. Please resubmit or contact support."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
