@@ -154,9 +154,9 @@ jobs:
           jq-filter: |
             [
               (.count == 4),
-              (.results | all(.status == "active")),
-              (.results | all(.operational_status == "U")),
-              (.results | all((.description // "") | length > 0)),
+              (.results | length == 4 and all(.status == "active")),
+              (.results | length == 4 and all(.operational_status == "U")),
+              (.results | length == 4 and all((.description // "") | length > 0)),
               (.results | any(.name == "Bed 1")),
               (.results | any(.name == "Bed 2")),
               (.results | any(.name == "Bed 3")),
@@ -168,9 +168,9 @@ jobs:
           output-jq-filter: |
             {
               bed_count: .count,
-              all_active: (.results | all(.status == "active")),
-              all_unoccupied: (.results | all(.operational_status == "U")),
-              all_described: (.results | all((.description // "") | length > 0)),
+              all_active: (.results | length == 4 and all(.status == "active")),
+              all_unoccupied: (.results | length == 4 and all(.operational_status == "U")),
+              all_described: (.results | length == 4 and all((.description // "") | length > 0)),
               has_bed1: (.results | any(.name == "Bed 1")),
               has_bed2: (.results | any(.name == "Bed 2")),
               has_bed3: (.results | any(.name == "Bed 3")),
