@@ -230,6 +230,7 @@ For `ohc-vta/care-actions/check-api@main`:
 * `expected` must equal the total number of assertions.
 * `output-jq-filter` should extract per-check booleans and any IDs needed later.
 * `label` must be human-readable.
+* Verify that `jq-filter` and `output-jq-filter` handle empty or short result sets correctly. `all(...)` on an empty array is vacuously `true` in jq — if the assertion only makes sense when the expected number of results is present, guard it with a count check (e.g. `length == 4 and all(...)`).
 
 Example pattern:
 
