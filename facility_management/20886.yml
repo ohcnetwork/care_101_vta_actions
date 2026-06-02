@@ -1,0 +1,346 @@
+name: Get Credentials Evaluation
+# Provisions a single CARE HMIS user for the student and emails the credentials.
+# This is the first target in the Facility Management module — every later
+# target reads the user from setup_data.json on main.
+#
+# Target is configured as non-resubmittable in the LMS, so this workflow runs
+# at most once per student.
+#
+# Grading model: this target is **feedback-only** (no pass/fail mutation).
+# Every outcome posts a feedback message via the createFeedback mutation, and
+# overall job status is reported separately with report-action.
+
+on:
+  push:
+    branches: ["submission-*"]
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    env:
+      CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
+      CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
+      # Fort Kochi geo_organization UUID — pre-seeded in CARE demo backend.
+      # Required by downstream targets (e.g. 20823.yml's facility checks).
+      FORT_KOCHI_ID: ${{ secrets.FORT_KOCHI_ID }}
+      # Role UUID assigned to students within the Fort Kochi geo organization.
+      # Pre-seeded in CARE demo backend; not a secret per se but stored here
+      # for consistency with FORT_KOCHI_ID.
+      FORT_KOCHI_STUDENT_ROLE_ID: ${{ secrets.FORT_KOCHI_STUDENT_ROLE_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.CARE_GITHUB_ACTION_TOKEN }}
+
+      # ── Parse submission data ──
+      - name: Parse submission data
+        id: parse
+        run: |
+          set -e
+          SUBMISSION_ID=$(jq -r '.id' submission.json)
+          STUDENT_ID=$(jq -r '.students[0]' submission.json)
+          EMAIL=$(jq -r '.checklist[0].result' submission.json)
+          # trim leading/trailing whitespace (spaces, tabs, CR, LF) from pasted input
+          EMAIL="${EMAIL#"${EMAIL%%[![:space:]]*}"}"
+          EMAIL="${EMAIL%"${EMAIL##*[![:space:]]}"}"
+
+          echo "submission_id=$SUBMISSION_ID" >> $GITHUB_OUTPUT
+          echo "student_id=$STUDENT_ID" >> $GITHUB_OUTPUT
+          echo "email=$EMAIL" >> $GITHUB_OUTPUT
+
+          # Username scheme: stu_<student_id> (4-16 chars, [a-z0-9_], alnum start/end).
+          USERNAME="stu_${STUDENT_ID}"
+          echo "username=$USERNAME" >> $GITHUB_OUTPUT
+
+          # Synthetic email for the CARE user record. The student's real email is
+          # used only for delivering credentials and is not stored on the CARE user.
+          USER_EMAIL="student-${STUDENT_ID}@example.com"
+          echo "user_email=$USER_EMAIL" >> $GITHUB_OUTPUT
+
+          # Generate a random password (mixed case + digits + special).
+          PASSWORD="$(tr -dc 'a-z' < /dev/urandom | head -c6)$(tr -dc 'A-Z' < /dev/urandom | head -c2)$(shuf -i 10-99 -n 1)@"
+          echo "::add-mask::$PASSWORD"
+          echo "password=$PASSWORD" >> $GITHUB_OUTPUT
+
+          # Phone: 9 + zero-padded student_id (10 digits total). Encodes the
+          # student id into the phone number for easy traceability in CARE.
+          # e.g. STUDENT_ID=230822 → 9000230822 → +919000230822.
+          PHONE=$(printf '9%09d' "$STUDENT_ID")
+          echo "phone=$PHONE" >> $GITHUB_OUTPUT
+
+      # ── Validate email syntax (friendly error if malformed) ──
+      - name: Validate email
+        id: validate_email
+        env:
+          EMAIL: ${{ steps.parse.outputs.email }}
+        run: |
+          set -e
+          # RFC 5322-lite check — good enough to catch typos.
+          if ! echo "$EMAIL" | grep -Eq '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'; then
+            FEEDBACK=$(printf "Uh oh! The email address you submitted doesn't look valid: \`%s\`\n\nPlease resubmit with a valid email address (e.g. \`yourname@example.com\`)." "$EMAIL")
+            {
+              echo "feedback<<__EOF__"
+              echo "$FEEDBACK"
+              echo "__EOF__"
+            } >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> $GITHUB_ENV
+          fi
+
+      - name: Post invalid-email feedback
+        if: steps.validate_email.outputs.feedback != ''
+        uses: ohc-vta/care-actions/pupilfirst-create-feedback@main
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+          FEEDBACK_BODY: ${{ steps.validate_email.outputs.feedback }}
+        with:
+          submission-id: ${{ steps.parse.outputs.submission_id }}
+
+      # ── Confirm FORT_KOCHI_ID secret is configured (course-config check) ──
+      - name: Validate course config
+        if: env.skip != 'true'
+        run: |
+          set -e
+          if [ -z "$FORT_KOCHI_ID" ]; then
+            echo "::error::FORT_KOCHI_ID secret is not set on this repository. Cannot provision setup_data.json."
+            exit 1
+          fi
+          if [ -z "$FORT_KOCHI_STUDENT_ROLE_ID" ]; then
+            echo "::error::FORT_KOCHI_STUDENT_ROLE_ID secret is not set on this repository. Cannot link student to organization."
+            exit 1
+          fi
+
+      # ── Check whether the username is available in CARE ──
+      - name: Check username availability
+        if: env.skip != 'true'
+        id: check_username
+        uses: ohc-vta/care-actions/check-username-availability@main
+        env:
+          CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
+          CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
+        with:
+          username: ${{ steps.parse.outputs.username }}
+
+      # ── If username is taken, fail loudly with feedback ──
+      # MVP behaviour: a taken username almost certainly means the student already
+      # ran this target on a previous attempt or there is a true collision. Since
+      # the target is non-resubmittable, downstream re-runs shouldn't happen via
+      # the LMS — flag for manual intervention.
+      - name: Reject taken username
+        id: reject_username
+        if: env.skip != 'true' && steps.check_username.outputs.available != 'true'
+        env:
+          USERNAME: ${{ steps.parse.outputs.username }}
+        run: |
+          set -e
+          FEEDBACK=$(printf "Uh oh! We couldn't reserve the username \`%s\` for you because it already exists in CARE.\n\nThis usually means an earlier setup attempt partially succeeded. Please contact support so we can finish provisioning your account." "$USERNAME")
+          {
+            echo "feedback<<__EOF__"
+            echo "$FEEDBACK"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+          echo "skip=true" >> $GITHUB_ENV
+
+      - name: Post username-taken feedback
+        if: steps.reject_username.outputs.feedback != ''
+        uses: ohc-vta/care-actions/pupilfirst-create-feedback@main
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+          FEEDBACK_BODY: ${{ steps.reject_username.outputs.feedback }}
+        with:
+          submission-id: ${{ steps.parse.outputs.submission_id }}
+
+      # ── Create the CARE user ──
+      - name: Create user
+        if: env.skip != 'true'
+        id: create_user
+        uses: ohc-vta/care-actions/create-user@main
+        env:
+          CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
+          CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
+        with:
+          username: ${{ steps.parse.outputs.username }}
+          password: ${{ steps.parse.outputs.password }}
+          first-name: Student
+          last-name: ${{ steps.parse.outputs.student_id }}
+          email: ${{ steps.parse.outputs.user_email }}
+          phone: ${{ steps.parse.outputs.phone }}
+          gender: non_binary
+
+      # ── Extract the new user's id from create-user's response ──
+      - name: Extract user id
+        if: env.skip != 'true'
+        id: user_id
+        env:
+          RESPONSE: ${{ steps.create_user.outputs.response }}
+        run: |
+          set -e
+          USER_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+          if [ -z "$USER_ID" ]; then
+            echo "::error::Could not extract id from create-user response"
+            exit 1
+          fi
+          echo "id=$USER_ID" >> $GITHUB_OUTPUT
+
+      # ── Add the new user to the Fort Kochi geo organization ──
+      # Required so the student appears in the organization roster and can be
+      # discovered by downstream targets that scope queries by organization.
+      - name: Add user to Fort Kochi organization
+        if: env.skip != 'true'
+        uses: ohc-vta/care-actions/add-user-to-org@main
+        env:
+          CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
+          CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
+        with:
+          org-id: ${{ env.FORT_KOCHI_ID }}
+          user-id: ${{ steps.user_id.outputs.id }}
+          role: ${{ env.FORT_KOCHI_STUDENT_ROLE_ID }}
+
+      # ── Persist setup_data.json on main ──
+      # Merges .user.{id,username,email} and .geo_organization.fort_kochi.id into
+      # whatever already exists on main, so other modules' keys are preserved.
+      - name: Persist setup_data.json to main
+        if: env.skip != 'true'
+        env:
+          USER_ID: ${{ steps.user_id.outputs.id }}
+          USERNAME: ${{ steps.parse.outputs.username }}
+          EMAIL: ${{ steps.parse.outputs.user_email }}
+          SUBMISSION_ID: ${{ steps.parse.outputs.submission_id }}
+        run: |
+          set -e
+          git fetch origin main
+          git checkout -B main origin/main
+
+          # Start from the existing setup_data.json on main, or {} if absent.
+          if [ ! -f setup_data.json ]; then
+            echo "{}" > setup_data.json
+          fi
+
+          jq \
+            --arg user_id "$USER_ID" \
+            --arg username "$USERNAME" \
+            --arg email "$EMAIL" \
+            --arg fort_kochi_id "$FORT_KOCHI_ID" \
+            '. as $root
+             | $root
+               + {user: (($root.user // {}) + {id: $user_id, username: $username, email: $email})}
+               + {geo_organization: (($root.geo_organization // {}) + {fort_kochi: (($root.geo_organization.fort_kochi // {}) + {id: $fort_kochi_id})})}' \
+            setup_data.json > setup_data.json.tmp
+          mv setup_data.json.tmp setup_data.json
+
+          # Stage first so the check covers both modified-tracked AND new-untracked files.
+          # `git diff --quiet` only inspects tracked files vs HEAD, so an untracked
+          # setup_data.json would otherwise be reported as "no changes" and skipped.
+          git add setup_data.json
+          if git diff --cached --quiet -- setup_data.json; then
+            echo "setup_data.json already up to date; nothing to commit."
+          else
+            git config user.name "HMIS bot"
+            git config user.email "hmiscare@gmail.com"
+            git commit -m "chore(setup): record user + geo_organization (submission $SUBMISSION_ID) [skip ci]"
+            git push origin main
+          fi
+
+          # Switch back to the submission branch so submission.json is visible again.
+          git checkout "$GITHUB_REF_NAME"
+
+      # ── Send credentials email (continue on error so a single SMTP failure
+      #    doesn't lock the student out of a non-resubmittable target) ──
+      - name: Send credentials email
+        if: env.skip != 'true'
+        id: send_email
+        continue-on-error: true
+        uses: ohc-vta/care-actions/send-email@main
+        with:
+          smtp-username: ${{ secrets.CARE_SMTP_USERNAME }}
+          smtp-password: ${{ secrets.CARE_SMTP_PASSWORD }}
+          to: ${{ steps.parse.outputs.email }}
+          subject: "Your CARE HMIS demo credentials — Facility Management Module"
+          student-name: Student ${{ steps.parse.outputs.student_id }}
+          username: ${{ steps.parse.outputs.username }}
+          password: ${{ steps.parse.outputs.password }}
+          login-url: ${{ secrets.CARE_FE_BASE_URL }}
+          body-html: |
+            <p>These credentials unlock the CARE HMIS demo environment for the
+            hands-on assignments in the Facility Management module of the Care
+            System Course. You'll use this account in the upcoming targets to
+            create your facility, departments, locations and users.</p>
+            <p>Return to the Pupilfirst LMS and continue with the next target —
+            the full instructions live there.</p>
+            <p>Wishing you all the best.</p>
+
+      # ── Build feedback for happy path / email-failed path ──
+      # This target is feedback-only (no grading). The Build feedback step
+      # composes the message; the Post feedback step delivers it via the LMS
+      # createFeedback mutation.
+      - name: Build success/email-failed feedback
+        id: build_feedback
+        if: env.skip != 'true'
+        env:
+          USERNAME: ${{ steps.parse.outputs.username }}
+          EMAIL: ${{ steps.parse.outputs.email }}
+          EMAIL_OUTCOME: ${{ steps.send_email.outcome }}
+          EMAIL_SENT_AT: ${{ steps.send_email.outputs.sent-at }}
+          SMTP_FROM: ${{ secrets.CARE_SMTP_USERNAME }}
+        run: |
+          set -e
+          if [ "$EMAIL_OUTCOME" = "success" ]; then
+            FEEDBACK=$(printf "Your CARE account has been provisioned and your credentials have been emailed to \`%s\` at %s (from \`%s\`).\n\nUsername: \`%s\`\n\nCheck your inbox (and spam folder) and continue with the next target." \
+              "$EMAIL" "$EMAIL_SENT_AT" "$SMTP_FROM" "$USERNAME")
+          else
+            FEEDBACK=$(printf "⚠️ Your CARE account has been provisioned (username: \`%s\`), **but we were unable to email your password** to \`%s\` after 3 attempts.\n\nDo NOT attempt the next target. Please contact support so we can deliver your password manually." \
+              "$USERNAME" "$EMAIL")
+          fi
+          {
+            echo "feedback<<__EOF__"
+            echo "$FEEDBACK"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post success/email-failed feedback
+        if: steps.build_feedback.outputs.feedback != ''
+        uses: ohc-vta/care-actions/pupilfirst-create-feedback@main
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+          FEEDBACK_BODY: ${{ steps.build_feedback.outputs.feedback }}
+        with:
+          submission-id: ${{ steps.parse.outputs.submission_id }}
+
+      # ── Unexpected-failure feedback (any earlier step crashed) ──
+      # Only fires if the job is failing AND no other feedback path ran.
+      - name: Post unexpected-failure feedback
+        if: failure() && steps.parse.outputs.submission_id != ''
+        uses: ohc-vta/care-actions/pupilfirst-create-feedback@main
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+          FEEDBACK_BODY: |
+            ⚠️ Something went wrong while provisioning your CARE account.
+
+            Please contact support and share this submission ID: `${{ steps.parse.outputs.submission_id }}`.
+        with:
+          submission-id: ${{ steps.parse.outputs.submission_id }}
+
+      # ── Report run status to LMS (no grading; status only) ──
+      - name: Report success to LMS
+        if: success()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "success"
+          description: "Credentials provisioning completed."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+
+      - name: Report failure to LMS
+        if: failure()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "error"
+          description: "Credentials provisioning failed unexpectedly. Please contact support."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
