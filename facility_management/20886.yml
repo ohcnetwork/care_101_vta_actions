@@ -1,4 +1,4 @@
-name: Get Credentials Evaluation
+name: Get Care Credentials
 # Provisions a single CARE HMIS user for the student and emails the credentials.
 # This is the first target in the Facility Management module — every later
 # target reads the user from setup_data.json on main.
@@ -15,7 +15,7 @@ on:
     branches: ["submission-*"]
 
 jobs:
-  provision:
+  provision_care_user:
     runs-on: ubuntu-latest
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
