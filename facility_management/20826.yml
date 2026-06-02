@@ -24,7 +24,7 @@ jobs:
           USER_ID=$(jq -r '.user.id' setup_data.json)
           EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
           DEPT_NAME=$(jq -r '.facility_management.department_name // empty' setup_data.json)
-          EXPECTED_ROOM_ID=$(jq -r '.location_management.casualty_id // empty' setup_data.json)
+          EXPECTED_ROOM_ID=$(jq -r '.location_management.room_id // empty' setup_data.json)
 
           # missing user.id: bootstrap did not run, not student-recoverable
           if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
@@ -205,13 +205,15 @@ jobs:
           if [ "$PASSED" = "true" ]; then
             HEADER="Great work! All checks passed. The department organization is correctly linked to your room location."
             STATUS="success"
+            FOOTER=""
           else
             HEADER="Uh oh! It looks like you've missed some parts of the assignment. Here are the results of the tests that we ran. A tick (✓) indicates a successful test, and a cross (✗) indicates a failed test."
             STATUS="failure"
+            FOOTER=$'\n\nPlease make sure that you go through the assignment instructions. To link an organization, navigate to your room location in CARE, click "Manage Organizations", and add your department from the list.'
           fi
 
-          FEEDBACK=$(printf "%s\n\n%s Your department organization \"%s\" should be linked to the room location\n\n%s The linked organization should be of type Department and not system-generated\n\nPlease make sure that you go through the assignment instructions. To link an organization, navigate to your room location in CARE, click \"Manage Organizations\", and add your department from the list." \
-            "$HEADER" "$T1" "$DEPT_NAME" "$T2")
+          FEEDBACK=$(printf "%s\n\n%s Your department organization **%s** should be linked to the **%s** room location\n\n%s The linked organization should be of type Department and not system-generated%s" \
+            "$HEADER" "$T1" "$DEPT_NAME" "$DEPT_NAME" "$T2" "$FOOTER")
 
           jq -n \
             --arg status "$STATUS" \
