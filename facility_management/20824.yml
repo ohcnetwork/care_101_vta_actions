@@ -207,19 +207,20 @@ jobs:
             --arg feedback "$FEEDBACK" \
             '{status: $status, feedback: $feedback}' > report.json
 
-      - name: Persist department name to setup_data.json
+      - name: Persist department name and id to setup_data.json
         if: env.skip_checks != 'true' && steps.check.outputs.passed == 'true'
         continue-on-error: true
         uses: ohc-vta/care-actions/persist-setup-data@main
         with:
           submission-id: ${{ steps.parse.outputs.submission_id }}
-          commit-message: "chore(setup): record facility_management.department_name (submission ${{ steps.parse.outputs.submission_id }})"
+          commit-message: "chore(setup): record facility_management.department_name and department_id (submission ${{ steps.parse.outputs.submission_id }})"
           jq-args: |
             name=${{ fromJSON(steps.check.outputs.extracted).dept_name }}
+            id=${{ steps.parse.outputs.department_id }}
           jq-merge: |
             . as $root | (.facility_management // {}) as $fm
-            | $root + {facility_management: ($fm + {department_name: $name})}
-          alert-context: "facility_management.department_name=${{ fromJSON(steps.check.outputs.extracted).dept_name }}"
+            | $root + {facility_management: ($fm + {department_name: $name, department_id: $id})}
+          alert-context: "facility_management.department_name=${{ fromJSON(steps.check.outputs.extracted).dept_name }}, facility_management.department_id=${{ steps.parse.outputs.department_id }}"
 
       - name: Grade submission
         if: always()

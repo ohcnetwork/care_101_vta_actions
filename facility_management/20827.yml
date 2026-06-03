@@ -1,0 +1,223 @@
+name: Create & Link User Evaluation
+
+on:
+  push:
+    branches: ["submission-*"]
+
+jobs:
+  evaluate_create_and_link_user:
+    runs-on: ubuntu-latest
+    env:
+      CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
+      CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.CARE_GITHUB_ACTION_TOKEN }}
+
+      - name: Fetch setup data from main
+        id: setup
+        run: |
+          git fetch origin main
+          git checkout origin/main -- setup_data.json
+          USER_ID=$(jq -r '.user.id' setup_data.json)
+          EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
+          DEPT_NAME=$(jq -r '.facility_management.department_name // empty' setup_data.json)
+          DEPT_ID=$(jq -r '.facility_management.department_id // empty' setup_data.json)
+
+          # missing user.id: bootstrap did not run, not student-recoverable
+          if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
+            echo "::error::Could not read user.id from setup_data.json"
+            exit 1
+          fi
+
+          # missing facility_id: Create Facility hasn't passed yet
+          if [ -z "$EXPECTED_FACILITY_ID" ] || [ "$EXPECTED_FACILITY_ID" = "null" ]; then
+            FEEDBACK="Please pass the **Create Facility** target first. It needs a passing grade before this evaluation can run."
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            echo "skip_checks=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # missing department_name or department_id: Create Department hasn't passed yet (or passed on an older version of the workflow)
+          if [ -z "$DEPT_NAME" ] || [ "$DEPT_NAME" = "null" ] || [ -z "$DEPT_ID" ] || [ "$DEPT_ID" = "null" ]; then
+            FEEDBACK="Please pass the **Create Department** target first (or resubmit it if you passed it earlier). The department must exist before a user can be linked to it."
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            echo "skip_checks=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "user_id=$USER_ID" >> $GITHUB_OUTPUT
+          echo "expected_facility_id=$EXPECTED_FACILITY_ID" >> $GITHUB_OUTPUT
+          echo "department_name=$DEPT_NAME" >> $GITHUB_OUTPUT
+          echo "department_id=$DEPT_ID" >> $GITHUB_OUTPUT
+
+      - name: Parse submission data
+        if: env.skip_checks != 'true'
+        id: parse
+        run: |
+          SUBMISSION_ID=$(jq -r '.id' submission.json)
+          SUBMITTED_USERNAME=$(jq -r '.checklist[1].result // empty' submission.json | tr -d '[:space:]')
+
+          echo "submission_id=$SUBMISSION_ID" >> $GITHUB_OUTPUT
+          echo "submitted_username=$SUBMITTED_USERNAME" >> $GITHUB_OUTPUT
+
+          # CARE username rule: lowercase alnum + underscore, 4-16 chars
+          if ! echo "$SUBMITTED_USERNAME" | grep -qE '^[a-z0-9_]{4,16}$'; then
+            echo "::error::Invalid username format: $SUBMITTED_USERNAME"
+            echo "valid=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "valid=true" >> $GITHUB_OUTPUT
+
+      - name: Validate submitted username format
+        if: env.skip_checks != 'true' && steps.parse.outputs.valid != 'true'
+        env:
+          SUBMITTED_USERNAME: ${{ steps.parse.outputs.submitted_username }}
+        run: |
+          FEEDBACK=$(printf "Uh oh! The username you submitted does not match the CARE username format.\n\nCARE usernames must be 4-16 characters, containing only lowercase letters, numbers and underscores.\n\nUsername submitted: \`%s\`" \
+            "$SUBMITTED_USERNAME")
+
+          jq -n \
+            --arg status "failure" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+          echo "skip_checks=true" >> $GITHUB_ENV
+
+      - name: Check user creation and link
+        if: env.skip_checks != 'true'
+        id: check
+        uses: ohc-vta/care-actions/check-api@main
+        env:
+          CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
+          CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
+        with:
+          endpoint: "/api/v1/facility/${{ steps.setup.outputs.expected_facility_id }}/organizations/${{ steps.setup.outputs.department_id }}/users/?limit=100&is_service_account=false"
+          method: GET
+          jq-filter: |
+            (.results | map(select(.user.username == "${{ steps.parse.outputs.submitted_username }}")) | first) as $m
+            | [
+                ($m != null),
+                ($m != null and $m.user.id != "${{ steps.setup.outputs.user_id }}"),
+                ($m != null and (($m.role.id // "") | length > 0)),
+                ($m != null and (($m.user.first_name // "") | length > 0)),
+                ($m != null and (($m.user.last_name // "") | length > 0)),
+                ($m != null and (($m.user.phone_number // "") | length > 0)),
+                ($m != null and (($m.user.gender // "") | length > 0))
+              ] | map(select(.)) | length
+          assertion: equals
+          expected: "7"
+          label: "User created with mandatory fields and linked to department with a role"
+          output-jq-filter: |
+            (.results | map(select(.user.username == "${{ steps.parse.outputs.submitted_username }}")) | first) as $m
+            | {
+                user_linked: ($m != null),
+                not_self: ($m != null and $m.user.id != "${{ steps.setup.outputs.user_id }}"),
+                has_role: ($m != null and (($m.role.id // "") | length > 0)),
+                has_first_name: ($m != null and (($m.user.first_name // "") | length > 0)),
+                has_last_name: ($m != null and (($m.user.last_name // "") | length > 0)),
+                has_phone_number: ($m != null and (($m.user.phone_number // "") | length > 0)),
+                has_gender: ($m != null and (($m.user.gender // "") | length > 0)),
+                role_name: ($m.role.name // ""),
+                new_user_id: ($m.user.id // "")
+              }
+
+      - name: Build feedback
+        if: env.skip_checks != 'true'
+        env:
+          RESULT: ${{ steps.check.outputs.result }}
+          RESULTS: ${{ steps.check.outputs.extracted }}
+          PASSED: ${{ steps.check.outputs.passed }}
+          SUBMITTED_USERNAME: ${{ steps.parse.outputs.submitted_username }}
+          DEPT_NAME: ${{ steps.setup.outputs.department_name }}
+        run: |
+          # API call failed
+          if echo "$RESULT" | grep -q '^error:'; then
+            FEEDBACK=$(printf "Uh oh! We couldn't fetch the users linked to the **%s** department from CARE.\n\nDetails: %s\n\nPlease try resubmitting. If the issue persists, contact support." \
+              "$DEPT_NAME" "$RESULT")
+
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            exit 0
+          fi
+
+          T1="✗"; T2="✗"; T3="✗"; T4="✗"; T5="✗"; T6="✗"; T7="✗"
+          [ "$(echo "$RESULTS" | jq -r '.user_linked')"     = "true" ] && T1="✓"
+          [ "$(echo "$RESULTS" | jq -r '.not_self')"        = "true" ] && T2="✓"
+          [ "$(echo "$RESULTS" | jq -r '.has_role')"        = "true" ] && T3="✓"
+          [ "$(echo "$RESULTS" | jq -r '.has_first_name')"  = "true" ] && T4="✓"
+          [ "$(echo "$RESULTS" | jq -r '.has_last_name')"   = "true" ] && T5="✓"
+          [ "$(echo "$RESULTS" | jq -r '.has_phone_number')" = "true" ] && T6="✓"
+          [ "$(echo "$RESULTS" | jq -r '.has_gender')"      = "true" ] && T7="✓"
+
+          if [ "$PASSED" = "true" ]; then
+            HEADER="Great work! All checks passed. The user **$SUBMITTED_USERNAME** is linked to your **$DEPT_NAME** department with a role."
+            STATUS="success"
+            FOOTER=""
+          else
+            HEADER="Uh oh! It looks like you've missed some parts of the assignment. Here are the results of the tests that we ran. A tick (✓) indicates a successful test, and a cross (✗) indicates a failed test."
+            STATUS="failure"
+            FOOTER=$'\n\nPlease make sure that you go through the assignment instructions. To create and link a user, navigate to **Settings → Users** in your facility, click **Create User**, fill in every mandatory field, select **\'Set password now\'**, and then link the user to your department by picking a role from the dropdown.'
+          fi
+
+          FEEDBACK=$(printf "%s\n\n%s User **%s** is linked to the **%s** department\n\n%s The submitted user is not your own account\n\n%s The user has a role assigned in the department\n\n%s First name is filled in\n\n%s Last name is filled in\n\n%s Phone number is filled in\n\n%s Gender is filled in%s" \
+            "$HEADER" "$T1" "$SUBMITTED_USERNAME" "$DEPT_NAME" "$T2" "$T3" "$T4" "$T5" "$T6" "$T7" "$FOOTER")
+
+          jq -n \
+            --arg status "$STATUS" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+      - name: Persist created username to setup_data.json
+        if: env.skip_checks != 'true' && steps.check.outputs.passed == 'true'
+        continue-on-error: true
+        uses: ohc-vta/care-actions/persist-setup-data@main
+        with:
+          submission-id: ${{ steps.parse.outputs.submission_id }}
+          commit-message: "chore(setup): record user_management.created_username (submission ${{ steps.parse.outputs.submission_id }})"
+          jq-args: |
+            created_username=${{ steps.parse.outputs.submitted_username }}
+          jq-merge: |
+            . as $root | (.user_management // {}) as $um
+            | $root + {user_management: ($um + {created_username: $created_username})}
+          alert-context: "user_management.created_username=${{ steps.parse.outputs.submitted_username }}"
+
+      - name: Grade submission
+        if: always()
+        uses: pupilfirst/grade-action@v1
+        with:
+          report_file_path: "report.json"
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+
+      - name: Report success to LMS
+        if: success()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "success"
+          description: "Create & link user evaluation completed."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+
+      - name: Report failure to LMS
+        if: failure()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "error"
+          description: "Create & link user evaluation failed unexpectedly. Please resubmit or contact support."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
