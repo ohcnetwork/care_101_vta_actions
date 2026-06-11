@@ -1,3 +1,3 @@
 # care_101_vta_actions
 
-Repo to house all GitHub Actions related to the VTA (Virtual Teaching Assistant) for Care Course.
+This repository contains all GitHub Actions used by the Care Course Virtual Teaching Assistant (VTA).

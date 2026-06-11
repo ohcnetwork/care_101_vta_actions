@@ -6,7 +6,7 @@ on:
 
 jobs:
   evaluate_beds:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
       CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
@@ -25,13 +25,13 @@ jobs:
           EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
           EXPECTED_ROOM_ID=$(jq -r '.location_management.room_id // empty' setup_data.json)
 
-          # missing user.id: bootstrap did not run, not student-recoverable
+          # missing user.id: setup has not run
           if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
             echo "::error::Could not read user.id from setup_data.json"
             exit 1
           fi
 
-          # missing facility_id: Create Facility hasn't passed yet, surface feedback
+          # missing facility_id: Create Facility has not passed
           if [ -z "$EXPECTED_FACILITY_ID" ] || [ "$EXPECTED_FACILITY_ID" = "null" ]; then
             FEEDBACK="Please pass the **Create Facility** target first. It needs a passing grade before this evaluation can run."
             jq -n \
@@ -42,7 +42,7 @@ jobs:
             exit 0
           fi
 
-          # missing room_id: Create Location hasn't passed yet, surface feedback
+          # missing room_id: Create Location has not passed
           if [ -z "$EXPECTED_ROOM_ID" ] || [ "$EXPECTED_ROOM_ID" = "null" ]; then
             FEEDBACK="Please pass the **Create Location** target first. The beds must be created inside the room location from that assignment."
             jq -n \
@@ -184,7 +184,6 @@ jobs:
           RESULTS: ${{ steps.check.outputs.extracted }}
           PASSED: ${{ steps.check.outputs.passed }}
         run: |
-          # API call failed
           if echo "$RESULT" | grep -q '^error:'; then
             FEEDBACK=$(printf "Uh oh! We couldn't fetch the beds from CARE.\n\nDetails: %s\n\nMake sure the URL you submitted is correct and that the beds haven't been deleted. Expected URL format: \`%s/facility/<facility-id>/settings/locations/<location-id>\`" \
               "$RESULT" "$CARE_FE_BASE_URL")

@@ -6,7 +6,7 @@ on:
 
 jobs:
   evaluate_department:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
       CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
@@ -24,13 +24,13 @@ jobs:
           USER_ID=$(jq -r '.user.id' setup_data.json)
           EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
 
-          # missing user.id: bootstrap did not run, not student-recoverable
+          # missing user.id: setup has not run
           if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
             echo "::error::Could not read user.id from setup_data.json"
             exit 1
           fi
 
-          # missing facility_id: Create Facility hasn't passed yet, surface feedback
+          # missing facility_id: Create Facility has not passed
           if [ -z "$EXPECTED_FACILITY_ID" ] || [ "$EXPECTED_FACILITY_ID" = "null" ]; then
             FEEDBACK="Please pass the **Create Facility** target first. Submitting it isn't enough — it needs a passing grade so this evaluation can verify the department belongs to your facility."
             jq -n \
@@ -76,7 +76,7 @@ jobs:
           echo "submission_id=$SUBMISSION_ID" >> $GITHUB_OUTPUT
           echo "department_url=$DEPARTMENT_URL" >> $GITHUB_OUTPUT
 
-          # Reject URLs not pointing at the configured CARE front-end
+          # reject URLs not from the CARE frontend
           case "$DEPARTMENT_URL" in
             "$CARE_FE_BASE_URL"/*)
               ;;
