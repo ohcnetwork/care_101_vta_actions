@@ -6,7 +6,7 @@ on:
 
 jobs:
   evaluate_location:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     env:
       CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
       CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
@@ -25,13 +25,13 @@ jobs:
           EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
           DEPT_NAME=$(jq -r '.facility_management.department_name // empty' setup_data.json)
 
-          # missing user.id: bootstrap did not run, not student-recoverable
+          # missing user.id: setup has not run
           if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
             echo "::error::Could not read user.id from setup_data.json"
             exit 1
           fi
 
-          # missing facility_id: Create Facility hasn't passed yet, surface feedback
+          # missing facility_id: Create Facility has not passed
           if [ -z "$EXPECTED_FACILITY_ID" ] || [ "$EXPECTED_FACILITY_ID" = "null" ]; then
             FEEDBACK="Please pass the **Create Facility** target first. Submitting it isn't enough — it needs a passing grade so this evaluation can verify the locations belong to your facility."
             jq -n \
@@ -42,7 +42,7 @@ jobs:
             exit 0
           fi
 
-          # missing department_name: Create Department hasn't passed yet, surface feedback
+          # missing department_name: Create Department has not passed
           if [ -z "$DEPT_NAME" ] || [ "$DEPT_NAME" = "null" ]; then
             FEEDBACK="Please pass the **Create Department** target first. The room location name must match the department name you chose in that assignment."
             jq -n \
