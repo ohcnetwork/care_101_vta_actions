@@ -1,0 +1,306 @@
+name: Create Healthcare Service Evaluation
+
+on:
+  push:
+    branches: ["submission-*"]
+
+jobs:
+  evaluate_healthcare_service:
+    runs-on: ubuntu-slim
+    env:
+      CARE_API_BASE_URL: ${{ secrets.CARE_API_BASE_URL }}
+      CARE_FE_BASE_URL: ${{ secrets.CARE_FE_BASE_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.CARE_GITHUB_ACTION_TOKEN }}
+
+      - name: Fetch setup data from main
+        id: setup
+        run: |
+          git fetch origin main
+          git checkout origin/main -- setup_data.json
+          USER_ID=$(jq -r '.user.id' setup_data.json)
+          EXPECTED_FACILITY_ID=$(jq -r '.facility_management.facility_id // empty' setup_data.json)
+          DEPT_NAME=$(jq -r '.facility_management.department_name // empty' setup_data.json)
+          EXPECTED_ROOM_ID=$(jq -r '.location_management.room_id // empty' setup_data.json)
+
+          # missing user.id: setup has not run
+          if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
+            echo "::error::Could not read user.id from setup_data.json"
+            exit 1
+          fi
+
+          # missing facility_id: Create Facility has not passed
+          if [ -z "$EXPECTED_FACILITY_ID" ] || [ "$EXPECTED_FACILITY_ID" = "null" ]; then
+            FEEDBACK="Please pass the **Create Facility** target first. It needs a passing grade before this evaluation can run."
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            echo "skip_checks=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # missing department_name: Create Department has not passed
+          if [ -z "$DEPT_NAME" ] || [ "$DEPT_NAME" = "null" ]; then
+            FEEDBACK="Please pass the **Create Department** target first. The healthcare service name and internal type must be based on your department."
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            echo "skip_checks=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # missing room_id: Create Location has not passed
+          if [ -z "$EXPECTED_ROOM_ID" ] || [ "$EXPECTED_ROOM_ID" = "null" ]; then
+            FEEDBACK="Please pass the **Create Location** target first. The healthcare service must be linked to the room location from that assignment."
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            echo "skip_checks=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "user_id=$USER_ID" >> $GITHUB_OUTPUT
+          echo "expected_facility_id=$EXPECTED_FACILITY_ID" >> $GITHUB_OUTPUT
+          echo "department_name=$DEPT_NAME" >> $GITHUB_OUTPUT
+          echo "expected_room_id=$EXPECTED_ROOM_ID" >> $GITHUB_OUTPUT
+
+      - name: Compute expected service name and internal type
+        if: env.skip_checks != 'true'
+        id: service_spec
+        run: |
+          DEPT_NAME="${{ steps.setup.outputs.department_name }}"
+
+          case "$DEPT_NAME" in
+            "Pharmacy")
+              EXPECTED_NAME="Pharmacy Services"
+              EXPECTED_TYPE="pharmacy"
+              ;;
+            "Laboratory")
+              EXPECTED_NAME="Laboratory Services"
+              EXPECTED_TYPE="lab"
+              ;;
+            "Radiology")
+              EXPECTED_NAME="Radiology Imaging Services"
+              EXPECTED_TYPE="scheduling"
+              ;;
+            "Emergency")
+              EXPECTED_NAME="Emergency Care Services"
+              EXPECTED_TYPE="scheduling"
+              ;;
+            *)
+              EXPECTED_NAME="${DEPT_NAME} Consultation"
+              EXPECTED_TYPE="scheduling"
+              ;;
+          esac
+
+          echo "expected_name=$EXPECTED_NAME" >> $GITHUB_OUTPUT
+          echo "expected_type=$EXPECTED_TYPE" >> $GITHUB_OUTPUT
+
+      - name: Parse submission data
+        if: env.skip_checks != 'true'
+        id: parse
+        run: |
+          SUBMISSION_ID=$(jq -r '.id' submission.json)
+          SERVICE_URL=$(jq -r '.checklist[1].result' submission.json)
+
+          echo "submission_id=$SUBMISSION_ID" >> $GITHUB_OUTPUT
+          echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+
+          # reject URLs not from the CARE frontend
+          case "$SERVICE_URL" in
+            "$CARE_FE_BASE_URL"/*)
+              ;;
+            *)
+              echo "::error::URL does not start with $CARE_FE_BASE_URL: $SERVICE_URL"
+              echo "valid=false" >> $GITHUB_OUTPUT
+              exit 0
+              ;;
+          esac
+
+          # URL format: <CARE_FE_BASE_URL>/facility/{facility_id}/settings/healthcare_services/{service_id}
+          UUID_RE='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+
+          URL_FACILITY_ID=$(echo "$SERVICE_URL" | sed -nE "s|.*/facility/($UUID_RE)/settings/healthcare_services/.*|\1|p")
+          SERVICE_ID=$(echo "$SERVICE_URL" | sed -nE "s|.*/facility/$UUID_RE/settings/healthcare_services/($UUID_RE).*|\1|p")
+
+          if [ -z "$URL_FACILITY_ID" ] || [ -z "$SERVICE_ID" ]; then
+            echo "::error::Could not parse facility_id and service_id from URL: $SERVICE_URL"
+            echo "valid=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "url_facility_id=$URL_FACILITY_ID" >> $GITHUB_OUTPUT
+          echo "service_id=$SERVICE_ID" >> $GITHUB_OUTPUT
+          echo "valid=true" >> $GITHUB_OUTPUT
+
+      - name: Validate parsed URL
+        if: env.skip_checks != 'true' && steps.parse.outputs.valid != 'true'
+        env:
+          SERVICE_URL: ${{ steps.parse.outputs.service_url }}
+        run: |
+          FEEDBACK=$(printf "Uh oh! The healthcare service URL you submitted could not be parsed. After creating the service, click on it to open its detail page and copy the URL from your browser address bar.\n\nExpected format: \`%s/facility/<facility-id>/settings/healthcare_services/<service-id>\`\n\nURL submitted: \`%s\`" \
+            "$CARE_FE_BASE_URL" "$SERVICE_URL")
+
+          jq -n \
+            --arg status "failure" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+          echo "skip_checks=true" >> $GITHUB_ENV
+
+      - name: Validate facility ownership in URL
+        if: env.skip_checks != 'true' && steps.parse.outputs.url_facility_id != steps.setup.outputs.expected_facility_id
+        env:
+          URL_FACILITY_ID: ${{ steps.parse.outputs.url_facility_id }}
+          EXPECTED_FACILITY_ID: ${{ steps.setup.outputs.expected_facility_id }}
+        run: |
+          FEEDBACK=$(printf "Uh oh! The URL you submitted points to a different facility than the one you created in the previous assignment.\n\nExpected facility id: %s\nFacility id in your URL: %s\n\nMake sure you create the healthcare service inside your own facility." \
+            "$EXPECTED_FACILITY_ID" "$URL_FACILITY_ID")
+
+          jq -n \
+            --arg status "failure" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+          echo "skip_checks=true" >> $GITHUB_ENV
+
+      - name: Check healthcare service requirements
+        if: env.skip_checks != 'true'
+        id: check
+        uses: ohc-vta/care-actions/check-api@main
+        env:
+          CARE_API_USERNAME: ${{ secrets.CARE_API_USERNAME }}
+          CARE_API_PASSWORD: ${{ secrets.CARE_API_PASSWORD }}
+        with:
+          endpoint: "/api/v1/facility/${{ steps.parse.outputs.url_facility_id }}/healthcare_service/${{ steps.parse.outputs.service_id }}/"
+          method: GET
+          jq-filter: |
+            [
+              (.name == "${{ steps.service_spec.outputs.expected_name }}"),
+              (.internal_type == "${{ steps.service_spec.outputs.expected_type }}"),
+              (.locations | any(.id == "${{ steps.setup.outputs.expected_room_id }}")),
+              (.managing_organization != null),
+              (.managing_organization != null and .managing_organization.name == "${{ steps.setup.outputs.department_name }}"),
+              (.managing_organization != null and .managing_organization.org_type == "dept"),
+              (.managing_organization != null and .managing_organization.system_generated == false)
+            ] | map(select(.)) | length
+          assertion: equals
+          expected: "7"
+          label: "All healthcare service requirements met"
+          output-jq-filter: |
+            {
+              service_id: .id,
+              name: (.name == "${{ steps.service_spec.outputs.expected_name }}"),
+              internal_type: (.internal_type == "${{ steps.service_spec.outputs.expected_type }}"),
+              location_linked: (.locations | any(.id == "${{ steps.setup.outputs.expected_room_id }}")),
+              org_set: (.managing_organization != null),
+              org_name: (.managing_organization != null and .managing_organization.name == "${{ steps.setup.outputs.department_name }}"),
+              org_type: (.managing_organization != null and .managing_organization.org_type == "dept"),
+              org_not_system: (.managing_organization != null and .managing_organization.system_generated == false)
+            }
+
+      - name: Build feedback
+        if: env.skip_checks != 'true'
+        env:
+          RESULT: ${{ steps.check.outputs.result }}
+          RESULTS: ${{ steps.check.outputs.extracted }}
+          PASSED: ${{ steps.check.outputs.passed }}
+          DEPT_NAME: ${{ steps.setup.outputs.department_name }}
+          EXPECTED_NAME: ${{ steps.service_spec.outputs.expected_name }}
+          EXPECTED_TYPE: ${{ steps.service_spec.outputs.expected_type }}
+        run: |
+          if echo "$RESULT" | grep -q '^error:'; then
+            FEEDBACK=$(printf "Uh oh! We couldn't fetch your healthcare service from CARE.\n\nDetails: %s\n\nMake sure the URL you submitted is correct and that the service hasn't been deleted. Expected URL format: \`%s/facility/<facility-id>/settings/healthcare_services/<service-id>\`" \
+              "$RESULT" "$CARE_FE_BASE_URL")
+
+            jq -n \
+              --arg status "failure" \
+              --arg feedback "$FEEDBACK" \
+              '{status: $status, feedback: $feedback}' > report.json
+            exit 0
+          fi
+
+          # map results to check flags
+          T1="✗"; T2="✗"; T3="✗"; T4="✗"; T5="✗"; T6="✗"; T7="✗"
+          [ "$(echo "$RESULTS" | jq -r '.name')"           = "true" ] && T1="✓"
+          [ "$(echo "$RESULTS" | jq -r '.internal_type')"  = "true" ] && T2="✓"
+          [ "$(echo "$RESULTS" | jq -r '.location_linked')"= "true" ] && T3="✓"
+          [ "$(echo "$RESULTS" | jq -r '.org_set')"        = "true" ] && T4="✓"
+          [ "$(echo "$RESULTS" | jq -r '.org_name')"       = "true" ] && T5="✓"
+          [ "$(echo "$RESULTS" | jq -r '.org_type')"       = "true" ] && T6="✓"
+          [ "$(echo "$RESULTS" | jq -r '.org_not_system')" = "true" ] && T7="✓"
+
+          if [ "$PASSED" = "true" ]; then
+            HEADER="Great work! All checks passed. Your healthcare service meets all the requirements."
+            STATUS="success"
+            FOOTER=""
+          else
+            HEADER="Uh oh! It looks like you've missed some parts of the assignment. Here are the results of the tests that we ran. A tick (✓) indicates a successful test, and a cross (✗) indicates a failed test."
+            STATUS="failure"
+            FOOTER=$'\n\nPlease make sure that you go through the assignment instructions and verify your healthcare service settings in CARE. If you\'re having trouble with this assignment, refer to the course materials and provided guidelines.'
+          fi
+
+          FEEDBACK=$(printf "%s\n\n%s Service name should be exactly \"%s\" (based on your \"%s\" department)\n\n%s Internal Type should be \"%s\"\n\n%s The room location from the Create Location assignment should be linked to this service\n\n%s A managing organization must be set\n\n%s Managing organization should be your \"%s\" department\n\n%s Managing organization type should be \"Department\"\n\n%s Managing organization should not be system-generated%s" \
+            "$HEADER" \
+            "$T1" "$EXPECTED_NAME" "$DEPT_NAME" \
+            "$T2" "$EXPECTED_TYPE" \
+            "$T3" \
+            "$T4" \
+            "$T5" "$DEPT_NAME" \
+            "$T6" \
+            "$T7" \
+            "$FOOTER")
+
+          jq -n \
+            --arg status "$STATUS" \
+            --arg feedback "$FEEDBACK" \
+            '{status: $status, feedback: $feedback}' > report.json
+
+      - name: Persist healthcare service ID to setup_data.json
+        if: env.skip_checks != 'true' && steps.check.outputs.passed == 'true'
+        continue-on-error: true
+        uses: ohc-vta/care-actions/persist-setup-data@main
+        with:
+          submission-id: ${{ steps.parse.outputs.submission_id }}
+          commit-message: "chore(setup): record facility_management.healthcare_service_id (submission ${{ steps.parse.outputs.submission_id }})"
+          jq-args: |
+            sid=${{ fromJSON(steps.check.outputs.extracted).service_id }}
+          jq-merge: |
+            . as $root | (.facility_management // {}) as $fm
+            | $root + {facility_management: ($fm + {healthcare_service_id: $sid})}
+          alert-context: "facility_management.healthcare_service_id=${{ fromJSON(steps.check.outputs.extracted).service_id }}"
+
+      - name: Grade submission
+        if: always()
+        uses: pupilfirst/grade-action@v1
+        with:
+          report_file_path: "report.json"
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+
+      - name: Report success to LMS
+        if: success()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "success"
+          description: "Healthcare service evaluation completed."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
+
+      - name: Report failure to LMS
+        if: failure()
+        uses: pupilfirst/report-action@v1
+        with:
+          status: "error"
+          description: "Healthcare service evaluation failed unexpectedly. Please resubmit or contact support."
+        env:
+          REVIEW_END_POINT: ${{ secrets.PF_REVIEW_END_POINT }}
+          REVIEW_BOT_USER_TOKEN: ${{ secrets.PF_REVIEW_BOT_USER_TOKEN }}
